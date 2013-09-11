@@ -1,0 +1,4964 @@
+From 795bead8e4de4a3772ec93a4331e9fc95e1afd23 Mon Sep 17 00:00:00 2001
+From: cocafe <1280552236@qq.com>
+Date: Thu, 4 Apr 2013 10:42:48 +0800
+Subject: [PATCH] drivers: merge samsung drivers
+
+Add j4fs and param drivers for janice
+---
+ drivers/samsung/Kconfig            |   18 +-
+ drivers/samsung/Makefile           |    3 +-
+ drivers/samsung/j4fs/Makefile      |   31 +
+ drivers/samsung/j4fs/fsd_common.c  | 2059 ++++++++++++++++++++++++++++++++++++
+ drivers/samsung/j4fs/j4fs.h        |  493 +++++++++
+ drivers/samsung/j4fs/j4fs_kernel.c | 1525 ++++++++++++++++++++++++++
+ drivers/samsung/j4fs/llid_kernel.c |  240 +++++
+ drivers/samsung/param/Makefile     |   29 +
+ drivers/samsung/param/param.c      |  465 ++++++++
+ 9 files changed, 4861 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/samsung/j4fs/Makefile
+ create mode 100644 drivers/samsung/j4fs/fsd_common.c
+ create mode 100644 drivers/samsung/j4fs/j4fs.h
+ create mode 100644 drivers/samsung/j4fs/j4fs_kernel.c
+ create mode 100644 drivers/samsung/j4fs/llid_kernel.c
+ create mode 100755 drivers/samsung/param/Makefile
+ create mode 100755 drivers/samsung/param/param.c
+
+diff --git a/drivers/samsung/Kconfig b/drivers/samsung/Kconfig
+index 74e6a70..22d38df 100644
+--- a/drivers/samsung/Kconfig
++++ b/drivers/samsung/Kconfig
+@@ -4,12 +4,28 @@
+ 
+ menu "Samsung Kernel Modules"
+ 
++config SAMSUNG_MODULES
++	tristate "Samsung Kernel Modules"
++	default m
++	help
++	  Say Y to enable Samsung kernel modules. j4fs and param
++	  modules are included.
++
++config J4FS
++	tristate "Samsung J4FS support"
++	depends on SAMSUNG_MODULES
++	default m
++	help
++	  Say Y to enable Samsung J4FS support.
++
+ config SAMSUNG_PARAM
+ 	tristate "Samsung Param-Partition Support"
+-	default n
++	depends on SAMSUNG_MODULES
++	default m
+ 	help
+ 		Say Y to enable Samsung Param support.
+ 
++
+ source "drivers/samsung/startup_reason/Kconfig"
+ 
+ endmenu
+diff --git a/drivers/samsung/Makefile b/drivers/samsung/Makefile
+index 754c42a..479e41d 100644
+--- a/drivers/samsung/Makefile
++++ b/drivers/samsung/Makefile
+@@ -4,5 +4,6 @@
+ 
+ # Object files in subdirectories
+ 
+-
+ obj-y				+= startup_reason/
++obj-$(CONFIG_J4FS)		+= j4fs/
++obj-$(CONFIG_SAMSUNG_PARAM)     += param/
+diff --git a/drivers/samsung/j4fs/Makefile b/drivers/samsung/j4fs/Makefile
+new file mode 100644
+index 0000000..6102317
+--- /dev/null
++++ b/drivers/samsung/j4fs/Makefile
+@@ -0,0 +1,31 @@
++##############################################################################
++# COPYRIGHT(C)	: Samsung Electronics Co.Ltd, 2006-2011 ALL RIGHTS RESERVED
++# 2009.02 - Currently managed by  JongMinKim <jm45.kim@samsung.com> , SungHwanYun <sunghwan.yun@samsung.com>
++##############################################################################
++# VERSION&DATE	: Version 1.00	2009/02
++##############################################################################
++
++MOD_NAME = j4fs
++
++ifneq ($(KERNELRELEASE), )
++
++EXTRA_CFLAGS +=  -I$(PRJROOT)/modules/include -I$(KDIR)/drivers/tfsr/Inc -I$(KDIR)/include -I$(KDIR)/include/linux -I$(KDIR)/include/asm -D__KERNEL
++
++obj-m := $(MOD_NAME).o
++
++$(MOD_NAME)-y := j4fs_kernel.o llid_kernel.o fsd_common.o
++
++else
++
++all:
++	@$(MAKE) -C $(KDIR) \
++		SUBDIRS=$(CURDIR) modules
++
++clean:
++	rm -f *.o *.ko *.mod.c *~ .*.cmd
++
++install:
++	@$(MAKE) --no-print-directory -C $(KDIR) \
++		SUBDIRS=$(CURDIR) modules_install
++
++endif
+diff --git a/drivers/samsung/j4fs/fsd_common.c b/drivers/samsung/j4fs/fsd_common.c
+new file mode 100644
+index 0000000..3bc8922
+--- /dev/null
++++ b/drivers/samsung/j4fs/fsd_common.c
+@@ -0,0 +1,2059 @@
++/*
++ * Copyright (C) 2008, 2009,  Samsung Electronics Co. Ltd. All Rights Reserved.
++ *       Written by Linux Lab, MITs Development Team, Mobile Communication Division.
++ */
++
++/*
++ * fsd_common.c
++ *
++ * File System Driver
++ *
++ *
++ * 2009.02 - First editing by SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ * 2009.03 - Currently managed by  SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ */
++#include <linux/slab.h>
++#include "j4fs.h"
++
++#ifndef __KERNEL__
++#include <asm/util.h>
++#endif
++
++j4fs_device_info device_info;
++unsigned int j4fs_traceMask=0;
++unsigned int j4fs_PORMask=0;
++unsigned int j4fs_PORCount=0;
++unsigned int j4fs_rw_start=0;
++j4fs_header ro_j4fs_header[J4FS_MAX_RO_FILES_NUMBER];
++int ro_j4fs_header_count=0;
++int j4fs_panic=0;
++
++#ifdef J4FS_TRANSACTION_LOGGING
++unsigned int j4fs_next_sequence=0;
++unsigned int j4fs_transaction_next_offset=0xffffffff;
++#endif
++
++int is_invalid_j4fs_rw_start()
++{
++	if((j4fs_rw_start<device_info.j4fs_offset) ||(j4fs_rw_start>= device_info.j4fs_end) ||
++		(ro_j4fs_header_count>=2 &&  ((ro_j4fs_header[ro_j4fs_header_count-2].link+ro_j4fs_header[ro_j4fs_header_count-1].length)>j4fs_rw_start)) ||
++		(ro_j4fs_header_count==1 && ((device_info.j4fs_offset+ro_j4fs_header[ro_j4fs_header_count-1].length)>j4fs_rw_start)))
++		return 1;
++	else return 0;
++}
++
++/*
++  * This function reads count number of bytes from the file specified by device, type, and ID and places them into 'buffer'.
++  * The file must be opened with the OPEN_READ option. The file read begins at the location of the last read or whatever file offset the special seek option set.
++  * If during the process there is a failure, the actual field indicates how many bytes were transferred and the status will contain a descriptive error code.
++  * parameters :
++  *   j4fs_ctrl->buffer
++  *   j4fs_ctrl->count
++  *   j4fs_ctrl->id
++  *   j4fs_ctrl->index
++  * return
++  *
++  */
++int fsd_read(j4fs_ctrl *ctl)
++{
++	DWORD offset, matching_offset=0xffffffff, len, count, file_length=0xffffffff;
++	int ret=-1;
++	j4fs_header *header;
++	int file_exist=0, i;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++	J4FS_T(J4FS_TRACE_FSD,("%s %d\n",__FUNCTION__,__LINE__));
++
++	for(i=0;i<ro_j4fs_header_count;i++)
++	{
++		header = &ro_j4fs_header[i];
++
++		//This j4fs_header cannot be interpreted.
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			j4fs_panic("This j4fs_header cannot be interpreted. So this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// This RO file was deleted and RO file should not be deleted. So this j4fs partition is crashed by some abnormal cause.
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			j4fs_panic("This RO file was deleted and RO file should not be deleted. So this j4fs partition is crashed by some abnormal cause.  This should be repaired.");
++			goto error1;
++		}
++
++		// File ID is dismatched, so read next file.
++		if(ctl->id && ctl->id!=header->id)
++		{
++			continue;
++		}
++
++		// File ID(inode number) is matched
++		#ifdef __KERNEL__
++		if( ((ctl->index + ctl->count + PAGE_SIZE-1)/PAGE_SIZE*PAGE_SIZE)
++			<= ((header->length + PAGE_SIZE-1)/PAGE_SIZE*PAGE_SIZE) )
++		#else
++		if( ((ctl->index + ctl->count + J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE)
++			<= ((header->length + J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE) )
++		#endif
++		{
++			matching_offset=(i>0)?ro_j4fs_header[i-1].link:device_info.j4fs_offset;
++			file_length=header->length;
++		}
++		else file_exist=1;
++
++		goto got_header;
++
++	}
++
++	if(is_invalid_j4fs_rw_start())
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! j4fs_rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x, ro_j4fs_header_count=0x%08x)\n",
++			__FUNCTION__, __LINE__, j4fs_rw_start, device_info.j4fs_end, ro_j4fs_header_count));
++		j4fs_panic("j4fs_rw_start is invalid");
++		goto error1;
++	}
++
++	// the start address of the RW area of the device (partition)
++	offset=j4fs_rw_start;
++
++	// find object header corresponding to ctl.id in RW area of the device (partition)
++	while(offset!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(offset);
++
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no RW files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			// There are no RW files in this partition and this can happen and this is a normal case.
++			if(offset==j4fs_rw_start) {
++				memset(ctl->buffer,0xff,ctl->count);
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// This file was deleted, so read next j4fs_header.
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			offset=header->link;
++			continue;
++		}
++
++		// File ID is dismatched, so read next file.
++		if(ctl->id && ctl->id!=header->id)
++		{
++			offset=header->link;
++			continue;
++		}
++
++		// File ID is matched. we should read lastest object larger than ctl.index, so go ahead.
++		#ifdef __KERNEL__
++		if( ((ctl->index + ctl->count + PAGE_SIZE-1)/PAGE_SIZE*PAGE_SIZE)
++			<= ((header->length + PAGE_SIZE-1)/PAGE_SIZE*PAGE_SIZE) )
++		#else
++		if( ((ctl->index + ctl->count + J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE)
++			<= ((header->length + J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE) )
++		#endif
++		{
++			matching_offset=offset;
++			file_length=header->length;
++		}
++		else file_exist=1;
++
++		offset=header->link;
++	}
++
++got_header:
++
++	//There is valid objects coressponding to ctl->id
++	if(matching_offset!=0xffffffff)
++	{
++		J4FS_T(J4FS_TRACE_FSD,("%s %d\n",__FUNCTION__,__LINE__));
++
++		// We found the wanted file above. Read the data
++		matching_offset+=J4FS_BASIC_UNIT_SIZE;	// j4fs_header takes J4FS_BASIC_UNIT_SIZE
++		matching_offset+=ctl->index;	// consider offset
++		if(ctl->count==0) len=file_length;
++		else len=ctl->count;
++		if(len>file_length) len=file_length;
++		count=0;
++
++		// read data per page size
++		while(len>=device_info.pagesize)
++		{
++			J4FS_T(J4FS_TRACE_FSD,("%s %d: (offset,count,len)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,matching_offset,count,len));
++
++			ret = FlashDevRead(&device_info, matching_offset, device_info.pagesize, ctl->buffer+count);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			count+=device_info.pagesize;
++			matching_offset+=device_info.pagesize;
++			len-=device_info.pagesize;
++		}
++
++		// read data less than one page and larger than sector
++		if(len>=512)
++		{
++			J4FS_T(J4FS_TRACE_FSD,("%s %d: (offset,count,len)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,matching_offset,count,len));
++
++			ret = FlashDevRead(&device_info, matching_offset, len/512*512, ctl->buffer+count);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			count+=(len/512*512);
++			matching_offset+=(len/512*512);
++			len-=(len/512*512);
++		}
++
++		// read remained data less than sector size(512Bytes)
++		if(len>0)
++		{
++			J4FS_T(J4FS_TRACE_FSD,("%s %d: (offset,count,len)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,matching_offset,count,len));
++
++			ret = FlashDevRead(&device_info, matching_offset, 512, buf);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			memcpy(ctl->buffer+count, buf, len);
++			count+=len;
++			len=0;
++		}
++
++	#ifdef __KERNEL__
++		kfree(buf);
++	#endif
++		return count;
++	}
++	else//There is no valid object coressponding to ctl->filename.
++	{
++		memset(ctl->buffer,0xff,ctl->count);
++	#ifdef __KERNEL__
++		kfree(buf);
++	#endif
++		if(file_exist) return ctl->count;
++		return J4FS_NO_FILE;
++	}
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
++
++/*
++  * This function writes count number of bytes from buffer to the file specified by device, type, and ID. The file must be opened with
++  * the OPEN_CREATE option. If during the process there is a failure, the actual field indicates how many bytes were transferred and the status
++  * will contain a descriptive error code. The file write begins at the location of the last write.
++  * parameters :
++  *   j4fs_ctrl->buffer
++  *   j4fs_ctrl->count
++  *   j4fs_ctrl->id
++  *   j4fs_ctrl->index
++  */
++int fsd_write(j4fs_ctrl *ctl)
++{
++	DWORD offset, last_object_offset=0xffffffff, last_object_length=0xffffffff, matching_latest_object_length=0xffffffff, buffer_index=0, len1, len2;
++	DWORD matching_latest_offset=0xffffffff, new_header_offset=0xffffffff, is_it_last_object=0;
++	j4fs_header *header = 0;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++#ifdef J4FS_TRANSACTION_LOGGING
++#ifdef __KERNEL__
++	j4fs_transaction *transaction;
++	transaction=kmalloc(J4FS_TRANSACTION_SIZE,GFP_NOFS);
++#else
++	BYTE buf1[J4FS_TRANSACTION_SIZE];
++	j4fs_transaction *transaction=(j4fs_transaction *)buf1;
++#endif
++#endif
++
++#ifdef __KERNEL__
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#endif
++
++	J4FS_T(J4FS_TRACE_FSD,("%s %d: (ino,index)=(%d,0x%08x)\n",__FUNCTION__,__LINE__,ctl->id,ctl->index));
++
++	if(is_invalid_j4fs_rw_start())
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! j4fs_rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x, ro_j4fs_header_count=0x%08x)\n",
++			__FUNCTION__, __LINE__, j4fs_rw_start, device_info.j4fs_end, ro_j4fs_header_count));
++		j4fs_panic("j4fs_rw_start is invalid");
++		goto error1;
++	}
++
++	// parameter checking
++	if(ctl->index < 0)
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! ctl->index is invalid(ctl->index=0x%08x)\n",
++			__FUNCTION__, __LINE__, ctl->index));
++		j4fs_panic("ctl->index is invalid");
++		goto error1;
++	}
++
++	if(ctl->count==0)
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: count is zero\n",__FUNCTION__, __LINE__));
++	#ifdef __KERNEL__
++		kfree(buf);
++	#ifdef J4FS_TRANSACTION_LOGGING
++		kfree(transaction);
++	#endif
++	#endif
++		return J4FS_SUCCESS;
++	}
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	// setting transaction variable
++	memset(transaction,0xff,J4FS_TRANSACTION_SIZE);
++	transaction->count=ctl->count;
++	transaction->index=ctl->index;
++	transaction->magic=J4FS_MAGIC;
++#endif
++
++	// the start address of the RW area of the device (partition)
++	offset=j4fs_rw_start;
++
++	// find space(offset) to write this file. offset follows last enry(last_offset,j4fs_header.link==0xffffffff) in the device
++	while(offset!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(offset);
++
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no RW files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			// There are no RW files in this partition or this first j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file.
++			// So, this case should not happen and/or should be repaired.
++			if(offset==j4fs_rw_start) {
++				j4fs_panic("There are no RW files in this partition or this first RW j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file. So, this case should not happen and/or should be repaired..");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		if(header->link==0xffffffff) last_object_offset=offset;
++
++		// we find ID-matching valid file. Because we should find latest file, go ahead.
++		if((ctl->id==header->id) && ((header->flags&0x1)==((header->flags&0x2)>>1))) matching_latest_offset = offset;
++
++		offset=header->link;
++	}
++
++	// There is no RW files with 'ctl->id' inode number in this partition. Before we write data of new file, user of j4fs should write j4fs_header of new file.
++	if( (matching_latest_offset<j4fs_rw_start) ||(matching_latest_offset>device_info.j4fs_end) ) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: matching_latest_offset is invalid(matching_latest_offset=0x%08x)\n",__FUNCTION__,__LINE__,matching_latest_offset));
++		j4fs_panic("There are no RW files in this partition. Before we write data of new file, user of j4fs should write j4fs_header of new file.");
++		goto error1;
++	}
++
++	// last_object_offset is invalid. last_object_offset should be between j4fs_rw_start and device_info.j4fs_end
++	if( (last_object_offset<j4fs_rw_start) ||(last_object_offset>device_info.j4fs_end) ) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: last_object_offset is invalid(last_object_offset=0x%08x)\n",__FUNCTION__,__LINE__,last_object_offset));
++		j4fs_panic("last_object_offset is invalid. last_object_offset should be between j4fs_rw_start and device_info.j4fs_end");
++		goto error1;
++	}
++
++	if(matching_latest_offset==last_object_offset) is_it_last_object=1;
++	else is_it_last_object=0;
++
++	// when this is a last object in partition (2,3,5,6,8)
++	if(is_it_last_object)
++	{
++		// the length of file which resides at last_object_offset(=matching_latest_offset)
++		matching_latest_object_length=header->length;
++
++		if(matching_latest_object_length < ctl->index)		// j4fs don't support file hole
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs don't support file hole(matching_latest_object_length,ctl->index)=(0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,matching_latest_object_length,ctl->index));
++			j4fs_panic("j4fs don't support file hole");
++			goto error1;
++		}
++		else if(matching_latest_object_length == ctl->index)	// when extend file size(2,3,5,6)
++		{
++			buffer_index=0;
++			offset=matching_latest_offset;
++			offset+=J4FS_BASIC_UNIT_SIZE;	// header
++			offset+=ctl->index;				// data
++
++			// check whether we should reclaim
++			if((offset+ctl->count)>device_info.j4fs_end)
++			{
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Reclaim is needed(offset,ctl->count,j4fs_end)=(0x%08x,0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,offset,ctl->count,device_info.j4fs_end));
++				ret=fsd_reclaim();
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++			#ifdef __KERNEL__
++				kfree(buf);
++			#endif
++				return J4FS_RETRY_WRITE;
++			}
++
++			// write first J4FS_BASIC_UNIT_SIZE-not-aligned data to Storage
++			if(ctl->index % J4FS_BASIC_UNIT_SIZE)
++			{
++				len1 = ctl->index % J4FS_BASIC_UNIT_SIZE;
++				len2=J4FS_BASIC_UNIT_SIZE-len1;
++				if(len2 > ctl->count) len2=ctl->count;
++
++				// read len1'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset-len1, (len1+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				memcpy(buf+len1, ctl->buffer, len2);
++
++				// write (len1+len2)'length' data to Stroage
++				ret = FlashDevWrite(&device_info, offset-len1, (len1+len2+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index += len2;
++				offset += len2;
++				ctl->count -= len2;
++			}
++
++			// write data per page size
++			while(ctl->count>=device_info.pagesize)
++			{
++				ret = FlashDevWrite(&device_info, offset, device_info.pagesize, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=device_info.pagesize;
++				offset+=device_info.pagesize;
++				ctl->count-=device_info.pagesize;
++			}
++
++			// write data less than one page and larger than sector
++			if(ctl->count>=512)
++			{
++				ret = FlashDevWrite(&device_info, offset, ctl->count/512*512, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=(ctl->count/512*512);
++				offset+=(ctl->count/512*512);
++				ctl->count-=(ctl->count/512*512);
++			}
++
++			// write remained data less than sector size(512Bytes)
++			if(ctl->count>0)
++			{
++				memcpy(buf, ctl->buffer+buffer_index, ctl->count);
++				ret = FlashDevWrite(&device_info, offset, 512, buf);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index+=ctl->count;
++				offset+=ctl->count;
++				ctl->count=0;
++			}
++
++			// update existing j4fs_header to extend file size
++			// read j4fs_header
++			ret = FlashDevRead(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			header=(j4fs_header *)buf;
++
++		#ifdef J4FS_TRANSACTION_LOGGING
++			// setting transaction variable
++			transaction->sequence=j4fs_next_sequence++;
++			transaction->ino=header->id;
++			strcpy(transaction->filename,header->filename);
++			transaction->opcode=J4FS_LAST_OBJECT_WRITE_EXTEND1;
++			transaction->offset=matching_latest_offset;
++			transaction->b_link=transaction->a_link=header->link;
++			transaction->b_length=header->length;
++			transaction->a_length=header->length+buffer_index;
++
++			ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++			if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++		#endif
++
++			// update file length
++			header->length += buffer_index;
++
++			ret = FlashDevWrite(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			goto done;
++		}
++		else if(matching_latest_object_length > ctl->index)	// when update existing data(8)
++		{
++			buffer_index=0;
++			offset=matching_latest_offset;
++			offset+=J4FS_BASIC_UNIT_SIZE;	// header
++			offset+=ctl->index;				// data
++
++			// check whether we should reclaim
++			if((offset+ctl->count)>device_info.j4fs_end)
++			{
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Reclaim is needed(offset,ctl->count,j4fs_end)=(0x%08x,0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,offset,ctl->count,device_info.j4fs_end));
++				ret=fsd_reclaim();
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++			#ifdef __KERNEL__
++				kfree(buf);
++			#ifdef J4FS_TRANSACTION_LOGGING
++				kfree(transaction);
++			#endif
++			#endif
++				return J4FS_RETRY_WRITE;
++			}
++
++			// write first J4FS_BASIC_UNIT_SIZE-not-aligned data to Storage
++			if(ctl->index % J4FS_BASIC_UNIT_SIZE)
++			{
++				len1 = ctl->index % J4FS_BASIC_UNIT_SIZE;
++				len2=J4FS_BASIC_UNIT_SIZE-len1;
++				if(len2 > ctl->count) len2=ctl->count;
++
++				// read len1'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset-len1, (len1+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				memcpy(buf+len1, ctl->buffer, len2);
++
++				// write (len1+len2)'length' data to Stroage
++				ret = FlashDevWrite(&device_info, offset-len1, (len1+len2+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index += len2;
++				offset += len2;
++				ctl->count -= len2;
++			}
++
++			// write data per page size
++			while(ctl->count>=device_info.pagesize)
++			{
++				ret = FlashDevWrite(&device_info, offset, device_info.pagesize, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=device_info.pagesize;
++				offset+=device_info.pagesize;
++				ctl->count-=device_info.pagesize;
++			}
++
++			// write data less than one page and larger than sector
++			if(ctl->count>=512)
++			{
++				ret = FlashDevWrite(&device_info, offset, ctl->count/512*512, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=(ctl->count/512*512);
++				offset+=(ctl->count/512*512);
++				ctl->count-=(ctl->count/512*512);
++			}
++
++			// write remained data less than sector size(512Bytes)
++			if(ctl->count>0)
++			{
++				// read 512B'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset, 512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				memcpy(buf, ctl->buffer+buffer_index, ctl->count);
++				ret = FlashDevWrite(&device_info, offset, 512, buf);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index+=ctl->count;
++				offset+=ctl->count;
++				ctl->count=0;
++			}
++
++			// update existing j4fs_header to update file size if needed
++			if((offset-matching_latest_offset-J4FS_BASIC_UNIT_SIZE) > matching_latest_object_length)
++			{
++				// read j4fs_header
++				ret = FlashDevRead(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				header=(j4fs_header *)buf;
++
++			#ifdef J4FS_TRANSACTION_LOGGING
++				// setting transaction variable
++				transaction->sequence=j4fs_next_sequence++;
++				transaction->ino=header->id;
++				strcpy(transaction->filename,header->filename);
++				transaction->opcode=J4FS_LAST_OBJECT_WRITE_EXTEND2;
++				transaction->offset=matching_latest_offset;
++				transaction->b_link=transaction->a_link=header->link;
++				transaction->b_length=header->length;
++				transaction->a_length=offset-matching_latest_offset-J4FS_BASIC_UNIT_SIZE;
++
++				ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++				if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++			#endif
++
++				header->length = offset-matching_latest_offset-J4FS_BASIC_UNIT_SIZE;
++				ret = FlashDevWrite(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++			}
++			goto done;
++		}
++		else
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: we should not come here\n",__FUNCTION__,__LINE__));
++			j4fs_panic("we should not come here");
++			goto error1;
++		}
++	}
++	else if(!is_it_last_object)
++	{
++		// the length of file which resides at last_object_offset
++		last_object_length = header->length;
++
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			goto error1;
++		}
++		header=(j4fs_header *)buf;
++		matching_latest_object_length=header->length;
++
++		if(matching_latest_object_length < ctl->index)		// j4fs don't support file hole
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs don't support file hole(matching_latest_object_length,ctl->index)=(0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,matching_latest_object_length,ctl->index));
++			j4fs_panic("j4fs don't support file hole");
++			goto error1;
++		}
++		else if(matching_latest_object_length >= (ctl->index+ctl->count))	// update not-last object in partition and No extension(7)
++		{
++			buffer_index=0;
++			offset=matching_latest_offset;
++			offset+=J4FS_BASIC_UNIT_SIZE;	// header
++			offset+=ctl->index;				// data
++
++			// check whether we should reclaim
++			if((offset+ctl->count)>device_info.j4fs_end)
++			{
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: This case should not happen(offset,ctl->count,j4fs_end)=(0x%08x,0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,offset,ctl->count,device_info.j4fs_end));
++				j4fs_panic("This case should not happen");
++				goto error1;
++			}
++
++			// write first J4FS_BASIC_UNIT_SIZE-not-aligned data to Storage
++			if(ctl->index % J4FS_BASIC_UNIT_SIZE)
++			{
++				len1 = ctl->index % J4FS_BASIC_UNIT_SIZE;
++				len2=J4FS_BASIC_UNIT_SIZE-len1;
++				if(len2 > ctl->count) len2=ctl->count;
++
++				// read len1'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset-len1, (len1+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				memcpy(buf+len1, ctl->buffer, len2);
++
++				// write (len1+len2)'length' data to Stroage
++				ret = FlashDevWrite(&device_info, offset-len1, (len1+len2+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index += len2;
++				offset += len2;
++				ctl->count -= len2;
++			}
++
++			// write data per page size
++			while(ctl->count>=device_info.pagesize)
++			{
++				ret = FlashDevWrite(&device_info, offset, device_info.pagesize, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=device_info.pagesize;
++				offset+=device_info.pagesize;
++				ctl->count-=device_info.pagesize;
++			}
++
++			// write data less than one page and larger than sector
++			if(ctl->count>=512)
++			{
++				ret = FlashDevWrite(&device_info, offset, ctl->count/512*512, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=(ctl->count/512*512);
++				offset+=(ctl->count/512*512);
++				ctl->count-=(ctl->count/512*512);
++			}
++
++			// write remained data less than sector size(512Bytes)
++			if(ctl->count>0)
++			{
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				// read 512B'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset, 512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				memcpy(buf, ctl->buffer+buffer_index, ctl->count);
++				ret = FlashDevWrite(&device_info, offset, 512, buf);
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index+=ctl->count;
++				offset+=ctl->count;
++				ctl->count=0;
++			}
++
++			goto done;
++		}
++		else if(matching_latest_object_length < (ctl->index+ctl->count))	// update not-last object in partition and file size is extended(9,11,12,13)
++		{
++			new_header_offset=last_object_offset;
++			new_header_offset+=J4FS_BASIC_UNIT_SIZE;	// header
++			new_header_offset+=last_object_length;			// data
++			new_header_offset=(new_header_offset+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// J4FS_BASIC_UNIT_SIZE Align
++
++			// copy existing 'all data' of 'matching_latest_offset' offset to 'new_header_offset' offset
++			len1=matching_latest_object_length;
++			len1=(len1+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// J4FS_BASIC_UNIT_SIZE Align
++			buffer_index=J4FS_BASIC_UNIT_SIZE;
++
++			// write data per J4FS_BASIC_UNIT_SIZE size
++			while(len1>=J4FS_BASIC_UNIT_SIZE)
++			{
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (matching_latest_offset,new_header_offset,buffer_index)=(0x%08x,0x%08x,0x%08x)\n",
++					__FUNCTION__,__LINE__,matching_latest_offset,new_header_offset,buffer_index));
++
++				ret = FlashDevRead(&device_info, matching_latest_offset+buffer_index, J4FS_BASIC_UNIT_SIZE, buf);
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				ret = FlashDevWrite(&device_info, new_header_offset+buffer_index, J4FS_BASIC_UNIT_SIZE, buf);
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index+=J4FS_BASIC_UNIT_SIZE;
++				len1-=J4FS_BASIC_UNIT_SIZE;
++			}
++
++			if(len1!=0)
++			{
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: This case should not happen(len1)=(0x%08x)\n",__FUNCTION__,__LINE__,len1));
++				j4fs_panic("This case should not happen");
++				goto error1;
++			}
++
++			// copy existing j4fs_header of 'matching_latest_offset' offset to 'new_header_offset' offset
++			J4FS_T(J4FS_TRACE_FSD,("%s %d: (matching_latest_offset,new_header_offset)=(0x%08x,0x%08x)\n", __FUNCTION__,__LINE__,matching_latest_offset,new_header_offset));
++			ret = FlashDevRead(&device_info, matching_latest_offset, J4FS_BASIC_UNIT_SIZE, buf);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			header=(j4fs_header *)buf;
++
++		#ifdef J4FS_TRANSACTION_LOGGING
++			// setting transaction variable
++			transaction->sequence=j4fs_next_sequence++;
++			transaction->ino=header->id;
++			strcpy(transaction->filename,header->filename);
++			transaction->opcode=J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP1;
++			transaction->offset=new_header_offset;
++			transaction->b_link=header->link;
++			transaction->a_link=0xffffffff;
++			transaction->b_length=transaction->a_length=header->length;
++
++			ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++			if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++		#endif
++
++			header->link=0xffffffff;
++
++			ret = FlashDevWrite(&device_info, new_header_offset, J4FS_BASIC_UNIT_SIZE, buf);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			// update the link of last_object_offset to indicate new_header_offset
++			// read j4fs_header
++			ret = FlashDevRead(&device_info, last_object_offset, J4FS_BASIC_UNIT_SIZE, buf);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			header=(j4fs_header *)buf;
++
++		#ifdef J4FS_TRANSACTION_LOGGING
++			// setting transaction variable
++			transaction->sequence=j4fs_next_sequence++;
++			transaction->ino=header->id;
++			strcpy(transaction->filename,header->filename);
++			transaction->opcode=J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP2;
++			transaction->offset=last_object_offset;
++			transaction->b_link=header->link;
++			transaction->a_link=new_header_offset;
++			transaction->b_length=transaction->a_length=header->length;
++
++			ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++			if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++		#endif
++
++			header->link= new_header_offset;
++			ret = FlashDevWrite(&device_info, last_object_offset, J4FS_BASIC_UNIT_SIZE, buf);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			// write new data(file size is extended)
++			buffer_index=0;
++			offset=new_header_offset;
++			offset+=J4FS_BASIC_UNIT_SIZE;	// header
++			offset+=ctl->index;				// data
++
++			// check whether we should reclaim
++			if((offset+ctl->count)>device_info.j4fs_end)
++			{
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Reclaim is needed(offset,ctl->count,j4fs_end)=(0x%08x,0x%08x,0x%08x)\n",__FUNCTION__,__LINE__,offset,ctl->count,device_info.j4fs_end));
++				ret=fsd_reclaim();
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++			#ifdef __KERNEL__
++				kfree(buf);
++			#endif
++				return J4FS_RETRY_WRITE;
++			}
++
++			// write first J4FS_BASIC_UNIT_SIZE-not-aligned data to Storage
++			if(ctl->index % J4FS_BASIC_UNIT_SIZE)
++			{
++				len1=ctl->index % J4FS_BASIC_UNIT_SIZE;
++				len2=J4FS_BASIC_UNIT_SIZE-len1;
++				if(len2 > ctl->count) len2=ctl->count;
++
++				// read len1'length' data from Stroage
++				ret = FlashDevRead(&device_info, offset-len1, (len1+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				memcpy(buf+len1, ctl->buffer, len2);
++
++				// write (len1+len2)'length' data to Stroage
++				ret = FlashDevWrite(&device_info, offset-len1, (len1+len2+511)/512*512, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index += len2;
++				offset += len2;
++				ctl->count -= len2;
++			}
++
++			// write data per page size
++			while(ctl->count>=device_info.pagesize)
++			{
++				ret = FlashDevWrite(&device_info, offset, device_info.pagesize, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=device_info.pagesize;
++				offset+=device_info.pagesize;
++				ctl->count-=device_info.pagesize;
++			}
++
++			// write data less than one page and larger than sector
++			if(ctl->count>=512)
++			{
++				ret = FlashDevWrite(&device_info, offset, ctl->count/512*512, ctl->buffer+buffer_index);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++				buffer_index+=(ctl->count/512*512);
++				offset+=(ctl->count/512*512);
++				ctl->count-=(ctl->count/512*512);
++			}
++
++			// write remained data less than sector size(512Bytes)
++			if(ctl->count>0)
++			{
++				memcpy(buf, ctl->buffer+buffer_index, ctl->count);
++				ret = FlashDevWrite(&device_info, offset, 512, buf);
++
++				J4FS_T(J4FS_TRACE_FSD,("%s %d: (buffer_index,offset,ctl->count)=(0x%08x,%d,%d)\n",__FUNCTION__,__LINE__,buffer_index,offset,ctl->count));
++
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++					goto error1;
++				}
++
++				buffer_index+=ctl->count;
++				offset+=ctl->count;
++				ctl->count=0;
++			}
++
++			// update new_header_offset to update file size extension
++			// read j4fs_header
++			ret = FlashDevRead(&device_info, new_header_offset, J4FS_BASIC_UNIT_SIZE, buf);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++			header=(j4fs_header *)buf;
++
++		#ifdef J4FS_TRANSACTION_LOGGING
++			// setting transaction variable
++			transaction->sequence=j4fs_next_sequence++;
++			transaction->ino=header->id;
++			strcpy(transaction->filename,header->filename);
++			transaction->opcode=J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP3;
++			transaction->offset=new_header_offset;
++			transaction->b_link=transaction->a_link=header->link;
++			transaction->b_length=header->length;
++			transaction->a_length=offset-new_header_offset-J4FS_BASIC_UNIT_SIZE;
++
++			ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++			if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++		#endif
++
++			header->length = offset-new_header_offset-J4FS_BASIC_UNIT_SIZE;
++			ret = FlashDevWrite(&device_info, new_header_offset, J4FS_BASIC_UNIT_SIZE, buf);
++
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++				goto error1;
++			}
++
++			goto done;
++		}
++		else
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: we should not come here\n",__FUNCTION__,__LINE__));
++			j4fs_panic("we should not come here");
++			goto error1;
++		}
++	}
++	else
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: we should not come here\n",__FUNCTION__,__LINE__));
++		j4fs_panic("we should not come here");
++		goto error1;
++	}
++
++done:
++	J4FS_T(J4FS_TRACE_FSD,("%s %d: write completed(written=%d)\n",__FUNCTION__,__LINE__,buffer_index));
++
++	fsd_print_meta_data();
++
++#ifdef __KERNEL__
++	kfree(buf);
++#ifdef J4FS_TRANSACTION_LOGGING
++	kfree(transaction);
++#endif
++#endif
++	return buffer_index;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#ifdef J4FS_TRANSACTION_LOGGING
++	kfree(transaction);
++#endif
++#endif
++	return J4FS_FAIL;
++}
++
++int fsd_unlink(char *filename)
++{
++	DWORD offset;
++	j4fs_header *header;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++	if(filename==NULL) {
++	#ifdef __KERNEL__
++		kfree(buf);
++	#endif
++		return 0;
++	}
++
++	if(is_invalid_j4fs_rw_start())
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! j4fs_rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x, ro_j4fs_header_count=0x%08x)\n",
++			__FUNCTION__, __LINE__, j4fs_rw_start, device_info.j4fs_end, ro_j4fs_header_count));
++		j4fs_panic("j4fs_rw_start is invalid");
++		goto error1;
++	}
++
++	// the start address of the RW area of the device (partition)
++	offset=j4fs_rw_start;
++
++	// find object header corresponding to filename
++	while(offset!=0xffffffff)
++	{
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no RW files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			// There are no RW files in this partition or this first j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file.
++			// So, this case should not happen and/or should be repaired.
++			if(offset==j4fs_rw_start) {
++				j4fs_panic("There are no RW files in this partition or this first RW j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file. So, this case should not happen and/or should be repaired..");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// This file was deleted, so read next j4fs_header.
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			offset=header->link;
++			continue;
++		}
++
++		// filename is dismatched, so read next file.
++		if(strcmp(filename,header->filename))
++		{
++			offset=header->link;
++			continue;
++		}
++
++		// this file will be deleted
++		header->flags=0x1;
++
++		ret = FlashDevWrite(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++
++	   		goto error1;
++		}
++
++		offset=header->link;
++	}
++
++	ret=fsd_reclaim();
++
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++
++		goto error1;
++	}
++
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return 0;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
++
++/*
++  * This function will reclaim all unused space on the device specified. Reclaim removes file objects that have been marked deleted and
++  * relocates valid file objects to create the maximum contiguous free space
++  */
++int fsd_reclaim()
++{
++	DWORD offset, rw_start;
++	j4fs_mst *mst;
++	j4fs_header *header;
++	int i;
++	int ret=-1;
++	int first_unused_area_offset=0xffffffff;
++
++#ifdef __KERNEL__
++	BYTE *buf_mst, *buf_header, *buf_data;
++#else
++	BYTE buf_mst[J4FS_BASIC_UNIT_SIZE], buf_header[J4FS_BASIC_UNIT_SIZE], buf_data[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++
++#ifdef J4FS_TRANSACTION_LOGGING
++#ifdef __KERNEL__
++	j4fs_transaction *transaction;
++	transaction=kmalloc(J4FS_TRANSACTION_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_TRANSACTION_SIZE];
++	j4fs_transaction *transaction=(j4fs_transaction *)buf;
++#endif
++#endif
++
++#ifdef __KERNEL__
++	buf_mst=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++	buf_header=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++	buf_data=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#endif
++
++	header=(j4fs_header *)buf_header;
++	mst=(j4fs_mst *)buf_mst;
++
++	// read mst
++	ret = FlashDevRead(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++
++   		goto error1;
++	}
++
++	// If MST is not recognized, Initialize MST
++	if(mst->magic!=J4FS_MAGIC)
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: MST is not recognized(mst.magic=0x%08x)\n",__FUNCTION__,__LINE__,mst->magic));
++		j4fs_panic("MST is not recognized");
++
++		goto error1;
++	}
++
++	if((mst->status|J4FS_PANIC_MASK)==J4FS_PANIC)
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs is crashed(mst.status=0x%08x)\n",__FUNCTION__,__LINE__,mst->status));
++		j4fs_panic("j4fs is crashed");
++
++   		goto error1;
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_RECLAIM,("\n%s %d: Reclaim Starts\n",__FUNCTION__,__LINE__));
++	fsd_print_meta_data();
++
++	// If reclaim is in progress(sudden power-off in progress of reclaim), restart reclaim. This is power-off-recovery(J4FS_POR)!!!
++	if(mst->status&J4FS_RECLAIM_MOVING_DATA_STEP_1) goto moving_data_step_1;
++	if(mst->status&J4FS_RECLAIM_MOVING_DATA_STEP_2) goto moving_data_step_2;
++	if(mst->status&J4FS_RECLAIM_UPDATE_LINK) goto update_link;
++
++	/**************************************************************************
++	 * This is first reclaim since last reclaim is done successfully(There are no power off in the middle of reclaim)
++	 **************************************************************************/
++
++	if(!mst->rw_start ||(mst->rw_start>= device_info.j4fs_end))
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x)\n", __FUNCTION__, __LINE__, mst->rw_start, device_info.j4fs_end));
++		j4fs_panic("rw_start is invalid");
++		goto error1;
++	}
++
++	// invalidate old valid files
++	fsd_mark_invalid();
++
++	// the start address of the RW area of the device (partition)
++	offset=mst->rw_start;
++
++	while(offset!=0xffffffff)
++	{
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf_header);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++
++		//This j4fs_header cannot be interpreted. We have scaned all objects in device(partition)
++		if(header->type!=J4FS_FILE_TYPE) break;
++
++		// This file is invalid(deleted)
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			if(mst->to==0) mst->to=offset;
++			offset=header->link;
++			continue;
++		}
++		// This file is valid(not deleted, reclaim may start)
++		else
++		{
++			// If this object is first object, just skip it
++			if(offset==device_info.j4fs_offset)
++			{
++				offset=header->link;
++				continue;
++			}
++
++			// If invalid object is not scanned yet, there are no place to copy this valid object
++			if(mst->to==0)
++			{
++				offset=header->link;
++				continue;
++			}
++
++			/**************************************************************************
++			 * Start to copy this valid object to invalid area(to offset)
++			 **************************************************************************/
++			mst->from=offset;
++			offset += J4FS_BASIC_UNIT_SIZE;	// header
++			offset += header->length;	// data
++			offset = (offset+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// J4FS_BASIC_UNIT_SIZE align. offset indicate 'end of this object and beginning of next object'
++			mst->end=offset;
++			mst->copyed=0;
++			mst->status=J4FS_RECLAIM_MOVING_DATA_STEP_1;
++
++			if(header->link==0xffffffff) mst->status|=J4FS_RECLAIM_LAST_OBJECT;
++
++			J4FS_POR(0x1,("%s %d: Power-off point-1\n",__FUNCTION__,__LINE__),2000);
++
++			// write mst reflected new status(from,end)
++			ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		   		goto error1;
++			}
++
++moving_data_step_1:
++
++			J4FS_POR(0x2,("%s %d: Power-off point-2\n",__FUNCTION__,__LINE__),2000);
++
++			// copy valid data('from' offset) to invalid area('to' offset)
++			while(mst->from < mst->end)
++			{
++				J4FS_POR(0x4,("%s %d: Power-off point-4\n",__FUNCTION__,__LINE__),2000);
++
++				// read valid data
++				ret = FlashDevRead(&device_info, mst->from, J4FS_BASIC_UNIT_SIZE, buf_data);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			   		goto error1;
++				}
++
++				J4FS_POR(0x8,("%s %d: Power-off point-8\n",__FUNCTION__,__LINE__),2000);
++
++				// write valid data
++				ret = FlashDevWrite(&device_info, mst->to, J4FS_BASIC_UNIT_SIZE, buf_data);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			   		goto error1;
++				}
++
++				J4FS_POR(0x10,("%s %d: Power-off point-10\n",__FUNCTION__,__LINE__),2000);
++
++				// write updated MST status(from,to)
++				mst->from+=J4FS_BASIC_UNIT_SIZE;
++				mst->to+=J4FS_BASIC_UNIT_SIZE;
++				mst->copyed+=J4FS_BASIC_UNIT_SIZE;
++				ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			   		goto error1;
++				}
++
++				J4FS_POR(0x20,("%s %d: Power-off point-20\n",__FUNCTION__,__LINE__),2000);
++
++			}
++
++			J4FS_POR(0x40,("%s %d: Power-off point-40\n",__FUNCTION__,__LINE__),2000);
++
++			// write updated MST status(offset,offset_number,from,to)
++			mst->offset[mst->offset_number]=mst->to-mst->copyed;
++			mst->offset_number++;
++			mst->status= (mst->status&J4FS_RECLAIM_LAST_OBJECT)|J4FS_RECLAIM_MOVING_DATA_STEP_2;
++			ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		   		goto error1;
++			}
++
++moving_data_step_2:
++			if(mst->status&J4FS_RECLAIM_LAST_OBJECT) offset=0xffffffff;
++			else offset=mst->end;
++
++			J4FS_POR(0x80,("%s %d: Power-off point-80\n",__FUNCTION__,__LINE__),2000);
++
++			/**************************************************************************
++			 * End of copying this valid object to invalid area(to offset)
++			 **************************************************************************/
++		}
++	}
++
++	J4FS_POR(0x100,("%s %d: Power-off point-100\n",__FUNCTION__,__LINE__),2000);
++
++	if(mst->offset_number==0) goto reclaim_done;
++
++	// Adjust j4fs_header.link of valid object
++	// write updated MST status(status)
++	mst->status=J4FS_RECLAIM_UPDATE_LINK;
++	ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto error1;
++	}
++
++update_link:
++
++	J4FS_POR(0x200,("%s %d: Power-off point-200\n",__FUNCTION__,__LINE__),2000);
++
++	// Adjust j4fs_header.link of valid objects excluding last object
++	if(mst->offset_number>=2)
++	{
++		for(i=0;i<mst->offset_number-1;i++)
++		{
++			J4FS_POR(0x400,("%s %d: Power-off point-400\n",__FUNCTION__,__LINE__),2000);
++
++			// read j4fs_header
++			ret = FlashDevRead(&device_info, mst->offset[i], J4FS_BASIC_UNIT_SIZE, buf_header);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		   		goto error1;
++			}
++
++			J4FS_POR(0x800,("%s %d: Power-off point-800\n",__FUNCTION__,__LINE__),2000);
++
++			header->link=mst->offset[i+1];
++
++			// write j4fs_header
++			ret = FlashDevWrite(&device_info, mst->offset[i], J4FS_BASIC_UNIT_SIZE, buf_header);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		   		goto error1;
++			}
++
++			J4FS_POR(0x1000,("%s %d: Power-off point-1000\n",__FUNCTION__,__LINE__),2000);
++
++		}
++	}
++
++	J4FS_POR(0x2000,("%s %d: Power-off point-2000\n",__FUNCTION__,__LINE__),2000);
++
++	// Adjust j4fs_header.link of last valid object
++	if(mst->offset_number>0)
++	{
++		J4FS_POR(0x4000,("%s %d: Power-off point-4000\n",__FUNCTION__,__LINE__),2000);
++
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, mst->offset[mst->offset_number-1], J4FS_BASIC_UNIT_SIZE, buf_header);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++
++		J4FS_POR(0x8000,("%s %d: Power-off point-8000\n",__FUNCTION__,__LINE__),2000);
++
++		header->link=0xffffffff;
++
++		// write j4fs_header
++		ret = FlashDevWrite(&device_info, mst->offset[mst->offset_number-1], J4FS_BASIC_UNIT_SIZE, buf_header);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++
++		J4FS_POR(0x10000,("%s %d: Power-off point-10000\n",__FUNCTION__,__LINE__),2000);
++
++		first_unused_area_offset = mst->offset[mst->offset_number-1] + J4FS_BASIC_UNIT_SIZE + header->length;
++		first_unused_area_offset = (first_unused_area_offset + J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;
++
++	}
++
++	J4FS_POR(0x20000,("%s %d: Power-off point-20000\n",__FUNCTION__,__LINE__),2000);
++
++	// write 'Reclaim Done'
++	rw_start=mst->rw_start;
++	memset(mst,0x0,J4FS_BASIC_UNIT_SIZE);
++	mst->magic=J4FS_MAGIC;
++	mst->status=J4FS_RECLAIM_DONE;
++	mst->rw_start=rw_start;
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	// setting transaction variable
++	memset(transaction,0xff,J4FS_TRANSACTION_SIZE);
++	transaction->magic=J4FS_MAGIC;
++	transaction->sequence=j4fs_next_sequence++;
++	transaction->opcode=J4FS_RECLAIM_STEP2;
++
++	ret = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		goto error1;
++	}
++
++	j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++	if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++#endif
++
++	ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf_mst);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto error1;
++	}
++
++#ifdef J4FS_RECLAIM_RESET_UNUSED_SPACE
++	// Set 'not used space' to 0xff. This is not mandatory
++	if(first_unused_area_offset!=0xffffffff)
++	{
++		memset(buf_data,0xff,J4FS_BASIC_UNIT_SIZE);
++		for(i=0; i<10*J4FS_BASIC_UNIT_SIZE; i+=J4FS_BASIC_UNIT_SIZE)
++		{
++			J4FS_T(J4FS_TRACE_FSD_RECLAIM,("%s %d: (first_unused_area_offset=0x%08x,i=0x%08x,j4fs_end=0x%08x)\n",__FUNCTION__,__LINE__,first_unused_area_offset,i,device_info.j4fs_end));
++			ret = FlashDevWrite(&device_info, first_unused_area_offset+i, J4FS_BASIC_UNIT_SIZE, buf_data);
++			if (error(ret)) {
++				J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		   		goto error1;
++			}
++		}
++	}
++#endif
++
++reclaim_done:
++	j4fs_rw_start=mst->rw_start;
++
++	// Handle the exception
++	if(!j4fs_rw_start ||(j4fs_rw_start>= device_info.j4fs_end))
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs_rw_start is set to default value(128KB)\n",__FUNCTION__,__LINE__));
++		j4fs_rw_start=device_info.j4fs_offset;
++	}
++
++	if(!ro_j4fs_header_count) fsd_read_ro_header();
++
++#ifdef __KERNEL__
++	kfree(buf_mst);
++	kfree(buf_header);
++	kfree(buf_data);
++#ifdef J4FS_TRANSACTION_LOGGING
++	kfree(transaction);
++#endif
++#endif
++
++	J4FS_T(J4FS_TRACE_FSD_RECLAIM,("\n%s %d: Reclaim Done\n",__FUNCTION__,__LINE__));
++	fsd_print_meta_data();
++
++	return J4FS_SUCCESS;
++
++error1:
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++
++	// Handle the exception
++	if(!j4fs_rw_start ||(j4fs_rw_start>= device_info.j4fs_end))
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs_rw_start is set to default value(128KB)\n",__FUNCTION__,__LINE__));
++		j4fs_rw_start=device_info.j4fs_offset;
++	}
++
++	if(!ro_j4fs_header_count) fsd_read_ro_header();
++	fsd_print_meta_data();
++
++#ifdef __KERNEL__
++	kfree(buf_mst);
++	kfree(buf_header);
++	kfree(buf_data);
++#ifdef J4FS_TRANSACTION_LOGGING
++	kfree(transaction);
++#endif
++#endif
++	return J4FS_FAIL;
++}
++
++// invalidate old valid files
++int fsd_mark_invalid()
++{
++	DWORD offset;
++	j4fs_header *header;
++	DWORD valid_offset[128][2];
++	int index=0;
++	int i,j;
++	j4fs_mst *mst;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++	mst=(j4fs_mst *)buf;
++
++	// read mst
++	ret = FlashDevRead(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto error1;
++	}
++
++	if(mst->magic==J4FS_MAGIC)
++	{
++		// the start address of the RW area of the device (partition)
++		offset=mst->rw_start;
++
++		if(!offset ||(offset>= device_info.j4fs_end))
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x)\n", __FUNCTION__, __LINE__, mst->rw_start, device_info.j4fs_end));
++			j4fs_panic("rw_start is invalid");
++			goto error1;
++		}
++	}
++	else
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! MST is invalid\n", __FUNCTION__, __LINE__));
++		j4fs_panic("MST is invalid");
++		goto error1;
++	}
++
++	// trace all RW object header
++	while(offset!=0xffffffff)
++	{
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no RW files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			// There are no RW files in this partition or this first j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file.
++			// So, this case should not happen and/or should be repaired.
++			if(offset==mst->rw_start) {
++				j4fs_panic("There are no RW files in this partition or this first RW j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file. So, this case should not happen and/or should be repaired..");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// This file was deleted, so read next j4fs_header.
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			offset=header->link;
++			continue;
++		}
++
++		// This file is valid.
++		valid_offset[index][0]=header->id;
++		valid_offset[index][1]=offset;
++		index++;
++		offset=header->link;
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("%s %d: index=%d\n",__FUNCTION__,__LINE__,index));
++
++	// Invalidate old files. we exclude last object header because last object header can't decide invalidation of old files
++	for(i=0;i<index-2;i++)
++	{
++		for(j=i+1;j<index-1;j++)
++		{
++			// If inode number is same, invalidate old object
++			if(valid_offset[i][0]==valid_offset[j][0])
++			{
++				//J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("%s %d\n",__FUNCTION__,__LINE__));
++
++				// read j4fs_header
++				ret = FlashDevRead(&device_info, valid_offset[i][1], J4FS_BASIC_UNIT_SIZE, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			   		goto error1;
++				}
++				header=(j4fs_header *)buf;
++
++				//This j4fs_header cannot be interpreted. It means there are no RW files in this partition(this can happen and this is a normal case) or
++				//this j4fs partition is crashed(this should not happen).
++				if(header->type!=J4FS_FILE_TYPE)
++				{
++					// There are no RW files in this partition or this first j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file.
++					// So, this case should not happen and/or should be repaired.
++					if(offset==mst->rw_start) {
++						j4fs_panic("There are no RW files in this partition or this first RW j4fs_header is crashed. Before we write data of new file, user of j4fs should write j4fs_header of new file. So, this case should not happen and/or should be repaired..");
++						goto error1;
++					}
++
++					// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++					j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++					goto error1;
++				}
++
++				// this file will be deleted
++				header->flags=0x1;
++
++				ret = FlashDevWrite(&device_info, valid_offset[i][1], J4FS_BASIC_UNIT_SIZE, buf);
++				if (error(ret)) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			   		goto error1;
++				}
++				break;
++			}
++		}
++	}
++
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++
++	return J4FS_SUCCESS;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
++
++
++int fsd_special(j4fs_ctrl *ctl)
++{
++	return FlashDevSpecial(&device_info,ctl->scmd);
++}
++
++// Read j4fs_header list of RO area
++int fsd_read_ro_header(void)
++{
++	DWORD offset;
++	j4fs_header *header;
++	int i;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++	ro_j4fs_header_count=0;
++
++	// the start address of the device (partition)
++	offset=	device_info.j4fs_offset;
++
++	// scanning all j4fs_header of RO area.
++	while(offset<j4fs_rw_start)
++	{
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++			goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted.
++		if(header->type!=J4FS_FILE_TYPE)
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: ERROR! RO file cannot be interpreted. (offset=%d)\n",__FUNCTION__,__LINE__,offset));
++			j4fs_panic("This j4fs_header cannot be interpreted. So this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// This file was deleted, so read next j4fs_header.
++		if((header->flags&0x1)!=((header->flags&0x2)>>1))
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: ERROR! RO file was deleted. (offset,ino,filename)=(%d,%d,%s)\n",__FUNCTION__,__LINE__,offset,header->id,header->filename));
++			offset=header->link;
++			continue;
++		}
++
++		if(ro_j4fs_header_count>=J4FS_MAX_RO_FILES_NUMBER)
++		{
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: ERROR! Too many ro files\n",__FUNCTION__,__LINE__));
++
++			j4fs_traceMask |= J4FS_TRACE_FSD_PRINT_META_DATA;
++			fsd_print_meta_data();
++			j4fs_traceMask &= ~J4FS_TRACE_FSD_PRINT_META_DATA;
++			goto error1;
++		}
++
++		memcpy(ro_j4fs_header+ro_j4fs_header_count, header, sizeof(j4fs_header));
++		ro_j4fs_header_count++;
++
++		offset=header->link;
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("\n====================== %s %d ================================\n", __FUNCTION__,__LINE__));
++
++	for(i=0;i<ro_j4fs_header_count;i++)
++	{
++		J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("%d : (link,type,flags,id,length,filename)=(0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,%s)\n",(i+1),ro_j4fs_header[i].link, ro_j4fs_header[i].type, ro_j4fs_header[i].flags, ro_j4fs_header[i].id, ro_j4fs_header[i].length, ro_j4fs_header[i].filename));
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("\n====================== %s %d ================================\n", __FUNCTION__,__LINE__));
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_SUCCESS;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++
++}
++
++#ifdef J4FS_TRANSACTION_LOGGING
++int fsd_initialize_transaction()
++{
++	int i, ret;
++	DWORD sequence=0,offset=0xffffffff;
++	j4fs_transaction *transaction;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_TRANSACTION_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_TRANSACTION_SIZE];
++#endif
++
++	transaction=(j4fs_transaction *)buf;
++
++	for(i=device_info.j4fs_end+1; i<device_info.j4fs_device_end; i+=J4FS_TRANSACTION_SIZE)
++	{
++		ret = FlashDevRead(&device_info, i, J4FS_TRANSACTION_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(ret=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++
++		if(transaction->magic!=J4FS_MAGIC) continue;
++		if(sequence<transaction->sequence)
++		{
++			sequence=transaction->sequence;
++			offset=i;
++		}
++	}
++
++	// there are no file system transaction
++	if(offset==0xffffffff)
++	{
++		j4fs_next_sequence=1;
++		j4fs_transaction_next_offset=device_info.j4fs_end+1;
++	}
++	else
++	{
++		j4fs_next_sequence=sequence+1;
++		j4fs_transaction_next_offset=offset+512;
++
++		if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end+1;
++	}
++
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_SUCCESS;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
++#endif
++
++int fsd_panic()
++{
++	j4fs_mst *mst;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++#else
++	BYTE buf[J4FS_BASIC_UNIT_SIZE];
++#endif
++
++	j4fs_panic=1;
++
++	// Marking j4fs panic by writing J4FS_PANIC to mst->status
++	ret = FlashDevRead(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error\n",__FUNCTION__,__LINE__));
++   		goto error1;
++	}
++
++	mst=(j4fs_mst *)buf;
++	mst->status|=J4FS_PANIC;
++
++	ret = FlashDevWrite(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto error1;
++	}
++
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_SUCCESS;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
++
++int fsd_print_meta_data()
++{
++	DWORD offset;
++	j4fs_header *header;
++	j4fs_mst *mst;
++	int i;
++	int ret=-1;
++
++#ifdef __KERNEL__
++	BYTE *buf;
++	buf=kmalloc(4096,GFP_NOFS);
++#else
++	BYTE buf[4096];
++#endif
++
++	if(!(j4fs_traceMask|J4FS_TRACE_FSD_PRINT_META_DATA)) return 0;
++
++	// print MST
++	ret = FlashDevRead(&device_info, 0, J4FS_BASIC_UNIT_SIZE, buf);
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error\n",__FUNCTION__,__LINE__));
++   		goto error1;
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("====================================================================\n"));
++
++	mst=(j4fs_mst *)buf;
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("(magic,from,to,end,offset_number,status,rw_start)=(0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x)\n",
++		mst->magic,mst->from,mst->to,mst->end,mst->offset_number,mst->status,mst->rw_start));
++
++	if(mst->magic==J4FS_MAGIC && mst->offset_number)
++	{
++		J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("offset: "));
++		for(i=0;i<mst->offset_number;i++)
++			J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("0x%x ", mst->offset[i]));
++		J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("\n"));
++	}
++
++	// the start address of the device (partition)
++	offset=	device_info.j4fs_offset;
++
++	i=0;
++	while(1)
++	{
++		// read j4fs_header
++		ret = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (error(ret)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++	   		goto error1;
++		}
++		header=(j4fs_header *)buf;
++
++		//This j4fs_header cannot be interpreted.
++		if(header->type!=J4FS_FILE_TYPE) break;
++
++		J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("%d : (link,type,flags,id,length,filename)=(0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,%s)\n",++i,header->link,header->type,header->flags,header->id,header->length,header->filename));
++
++		// this is last enry in the device
++		if(header->link==0xffffffff)
++		{
++			break;
++		}
++		else
++		{
++			offset += J4FS_BASIC_UNIT_SIZE;	// header
++			offset += header->length;	// data
++			offset = (offset+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// 4096 align
++			if(mst->from && offset>=mst->to) offset=mst->from;	// In case of power-off when reclaim(mst-from>0), skip from 'to offset' to 'from offset'
++		}
++	}
++
++	J4FS_T(J4FS_TRACE_FSD_PRINT_META_DATA,("====================================================================\n"));
++
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_SUCCESS;
++
++error1:
++#ifdef __KERNEL__
++	kfree(buf);
++#endif
++	return J4FS_FAIL;
++}
+diff --git a/drivers/samsung/j4fs/j4fs.h b/drivers/samsung/j4fs/j4fs.h
+new file mode 100644
+index 0000000..9a40b4f
+--- /dev/null
++++ b/drivers/samsung/j4fs/j4fs.h
+@@ -0,0 +1,493 @@
++/*
++ * Copyright (C) 2008, 2009,  Samsung Electronics Co. Ltd. All Rights Reserved.
++ *       Written by Linux Lab, MITs Development Team, Mobile Communication Division.
++ */
++
++/*
++ * J4FS
++ *
++ * Jong Jang Jintae Jongmin File System is based on LFS(Linear File Store)
++ *
++ *
++ * 2009.02 - First editing by SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ * 2009.03 - Currently managed by  SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ * 2009.12 - Version 1.0 Released by SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ */
++
++#ifdef __KERNEL__
++#include <linux/version.h>
++#include <linux/types.h>
++#include <asm/types.h>
++#include <linux/spinlock.h>
++#include <linux/fs.h>
++#include <linux/mount.h>
++#include <linux/buffer_head.h>
++
++#ifndef BYTE
++#define BYTE __u8
++#endif
++
++#ifndef WORD
++#define WORD __u16
++#endif
++
++#ifndef HWORD
++#define HWORD __u16
++#endif
++
++#ifndef DWORD
++#define DWORD __u32
++#endif
++
++#define PRINT printk
++
++#else
++
++#ifndef BYTE
++#define BYTE unsigned char
++#endif
++
++#ifndef WORD
++#define WORD unsigned int
++#endif
++
++#ifndef HWORD
++#define HWORD unsigned int
++#endif
++
++#ifndef DWORD
++#define DWORD unsigned int
++#endif
++
++#define PRINT printf
++
++#endif
++
++/**********************************************************
++ * This is porting values
++ **********************************************************/
++#define PHYSICAL_PAGE_SIZE		2048		// 4KB
++#define PHYSICAL_BLOCK_SIZE	PHYSICAL_PAGE_SIZE*64		// 256KB
++#define J4FS_PARTITION_ID		21
++#undef J4FS_USE_XSR							// NO XSR
++// J4FS for moviNAND merged from ROSSI
++#undef J4FS_USE_FSR						// FSR
++#define J4FS_USE_MOVI
++
++#if defined(J4FS_USE_MOVI)
++#define J4FS_BLOCK_COUNT	20
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++/*
++ * J4FS Version(J4FS_1.0.0p3_b0)
++ */
++#define J4FS_VER_MAJOR			1
++#define J4FS_VER_MINOR1			0
++#define J4FS_VER_MINOR2			0
++#define J4FS_VER_PATCHLEVEL		3
++#define J4FS_BUILD_NUMBER		0
++
++
++/*
++ * file header(j4fs_header) and data block and media status table(j4fs_mst) size
++ */
++#define J4FS_BASIC_UNIT_SIZE			2048
++#define J4FS_BASIC_UNIT_SIZE_BITS		11
++
++/*
++ * File name length
++ */
++#define J4FS_NAME_LEN 128
++
++/*
++ * Max RO file number
++ */
++#define J4FS_MAX_RO_FILES_NUMBER 200
++
++/*
++  * Max file number in J4FS
++ */
++#define J4FS_MAX_FILE_NUM	256
++
++/*
++ * Special inode numbers
++ */
++#define J4FS_BAD_INO		 1	/* Bad blocks inode */
++#define J4FS_ROOT_INO		 2	/* Root inode */
++#define J4FS_BOOT_LOADER_INO	 5	/* Boot loader inode */
++#define J4FS_UNDEL_DIR_INO	 6	/* Undelete directory inode */
++#define J4FS_FIRST_INO	11 /* First non-reserved inode */
++
++/*
++  * Reclaim status
++ */
++#define J4FS_RECLAIM_DONE							0x01230000	// This value should not be zero becaust of POR
++#define J4FS_RECLAIM_MOVING_DATA_STEP_1		0x00000001
++#define J4FS_RECLAIM_MOVING_DATA_STEP_2		0x00000002
++#define J4FS_RECLAIM_UPDATE_LINK					0x00000004
++#define J4FS_RECLAIM_LAST_OBJECT					0x10000000
++#define J4FS_PANIC										0x00005a00
++#define J4FS_PANIC_MASK								0x0000ff00
++
++// Debug
++#define J4FS_TRACE_FSD					0x00000001
++#define J4FS_TRACE_FS						0x00000002
++#define J4FS_TRACE_FS_READ				0x00000004
++#define J4FS_TRACE_LOCK					0x00000008
++#define J4FS_TRACE_FSD_RECLAIM		0x00000010
++#define J4FS_TRACE_FSD_PRINT_META_DATA		0x00000020
++
++#define J4FS_TRACE_ALWAYS		0xF0000000
++
++/*
++ * Define return value
++ */
++#define J4FS_SUCCESS			0x0
++#define J4FS_RETRY_WRITE		0x20000000
++#define J4FS_FAIL					0x40000000
++#define J4FS_NO_FILE			0x40001000
++
++/*
++ * opcode : j4fs transaction for j4fs crash debugging
++ */
++#define J4FS_LAST_OBJECT_CREATE_STEP1							0x1		// 1,4,10
++#define J4FS_LAST_OBJECT_CREATE_STEP2							0x2		// 1,4,10
++#define J4FS_LAST_OBJECT_WRITE_EXTEND1						0x10		// 2,3,5,6
++#define J4FS_LAST_OBJECT_WRITE_EXTEND2						0x20		// 8
++#define J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP1			0x100		// 9,11,12,13
++#define J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP2			0x110	// 9,11,12,13
++#define J4FS_NOLAST_OBJECT_WRITE_EXTEND_STEP3			0x120	// 9,11,12,13
++#define J4FS_RECLAIM_STEP1											0x1000	// reclaim
++#define J4FS_RECLAIM_STEP2											0x2000	// reclaim
++
++#define J4FS_RECLAIM_RESET_UNUSED_SPACE
++#define J4FS_TRANSACTION_LOGGING
++
++#define J4FS_T(mask, p) do { if ((mask) & (j4fs_traceMask | J4FS_TRACE_ALWAYS)) TOUT(p); } while (0)
++#define J4FS_POR(mask, p, q) do { if (((mask) & (j4fs_PORMask))&&!(--j4fs_PORCount)) {TOUT(p); while(1); }} while (0)
++
++#define error(ret)	(ret>=J4FS_FAIL)
++
++#ifdef __KERNEL__
++#define j4fs_panic(str)		\
++do {							\
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: "str"\n",__FUNCTION__,__LINE__));	\
++	fsd_panic();		\
++	dump_stack();	\
++} while (0)
++#else
++#define j4fs_panic(str)		\
++do {							\
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: "str"\n",__FUNCTION__,__LINE__));	\
++	fsd_panic();	\
++} while (0)
++#endif
++
++#ifdef __KERNEL__
++#define j4fs_dump(str)		\
++do {							\
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: "str"\n",__FUNCTION__,__LINE__));	\
++	dump_stack();	\
++} while (0)
++#else
++#define j4fs_dump(str)		\
++do {							\
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: "str"\n",__FUNCTION__,__LINE__));	\
++	while(1);	\
++} while (0)
++#endif
++
++
++#define j4fs_check_partition_range(offset)		\
++do {		\
++	if(offset + J4FS_BASIC_UNIT_SIZE > device_info.j4fs_end) {	\
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: offset overflow(offset=0x%08x, j4fs_end=0x%08x)\n", __FUNCTION__, __LINE__, offset, device_info.j4fs_end));	\
++		j4fs_panic("offset overflow!!");	\
++		goto error1;	\
++	}	\
++} while(0)
++
++
++
++#ifdef __KERNEL__
++/*
++ * Flash data structure of the super block
++ */
++struct j4fs_super_block {
++	unsigned long pad;
++};
++
++/*
++ * Memory data structure of the super block
++ */
++struct j4fs_sb_info {
++	struct j4fs_super_block * s_es;	/* Pointer to the super block in the buffer */
++	unsigned long	s_log_block_size;	/* Block size(0:1024, 1:2048, 3:4096)*/
++	int s_first_ino;
++};
++
++/*
++ * Flash data structure of the inode
++ */
++struct j4fs_inode {
++	__le32 i_link;
++	__le32 i_size;
++	__le32 i_type;
++	__le32 i_offset;
++	__le32 i_flags;
++	__le32 i_stroff;
++	__le32 i_id;
++	__le32	i_length;
++	__u8 i_filename[J4FS_NAME_LEN];
++};
++
++/*
++ * Memory data structure of the inode
++ */
++struct j4fs_inode_info {
++	__le32 i_link;
++	__le32 i_type;
++	__le32 i_flags;
++	__le32 i_id;
++	__le32	i_length;
++	__u8 i_filename[J4FS_NAME_LEN];
++	rwlock_t i_meta_lock;
++	struct inode	vfs_inode;
++};
++
++#endif
++
++
++#define J4FS_INIT				1
++#define J4FS_GET_INFO		2
++#define J4FS_EXIT			4
++
++#ifndef __KERNEL__
++#define J4FS_FORMAT		3
++#endif
++
++#define J4FS_FILE_TYPE		0x12345678
++#define J4FS_MAGIC			0x87654321
++
++/*
++  * device : This field indicates the device(partition) number to be acted upon. Device can also be thought of as a partition. This field is STL partition id.
++  * status : This field provides a mechanism to pass a detailed failure back to the application. Typical functions will place a detailed error in this field
++  *               and return SUCCESS or FAILURE back to the calling function.
++  * buffer  : This field provides a pointer to a memory buffer to translate data either to or from a function
++  * count  : This field indicates the number of bytes transferred. This field is usually used on write operations
++  * actual  : This field indicates whether or not a read or write is possible to a position by comparing the requested source file size with the actual size
++  *              of the target position.
++  * scmd   : This field provides a subcommand for possible use in the future
++  * type    : PCMCIA requires that LFS headers contain a stamp indicating the type of the header. For our implementation, this field has been assigned
++  *              ZERO (0), indicating the 32 byte header above.
++  * id        : This value is unique to each file object. This unique id field is to be used as a file identifier
++  * aux     : This field does not get initialized in the FlashDevMount function. It provides a mechanism to pass extra information to/from the low-level
++  *              function set
++  * index   : file offset to read or write
++ */
++typedef struct {
++	DWORD device;
++	DWORD status;
++	BYTE *buffer;
++	DWORD count;
++	DWORD actual;
++	DWORD scmd;
++	DWORD type;
++	DWORD id;
++	DWORD aux;
++	DWORD index;
++} j4fs_ctrl;
++
++
++/*
++  * we assume j4fs_header is aligned with page size
++  *
++  * link     : This field contains the offset from the start of this header to the next LFS header in the device(partition). If each bit in this field is equal to bit D0
++  *             of the flags field, this is the last entry in the device.
++  * size    : This is the actual size of the LFS header. [Obsoleted]
++  * type   : PCMCIA requires that LFS headers contain a stamp indicating the type of the header. For our implementation, this field has been assigned ZERO
++  *             (0), indicating the 32-byte header above. This type field is assigned to this header to distinguish it from other headers that may exist
++  *             in the device. This prevents the FSD from reading a header it cannot interpret.
++  * offset : This field indicates how far from the start of this header into the entry the file data begins. This allows LFS implementations that use extended
++  *             headers to be compatible with drivers that can't read the extended header.[Obsoleted]
++  * flags   : This is a bit-mapped flags field. Bit D0 indicates the nature of the flash (1 erase or 0 erase). Bit D1 indicates whether or not this file entry is
++  *             valid or deleted: if D1 matches D0 the file is valid, if D1 differs, than that file is deleted
++  * stroff  : This field points to the extended header associated with this file. The actual location of the filename string is determined by adding the value
++  *             in this field to the address of the LFS_HEADER. If this field is zero, there is no filename.[Obsoleted]
++  * id       : This value is unique to each file object. This unique id field is to be used as a file identifier
++  * length : file data length
++  * filename : filename
++*/
++typedef struct {
++	DWORD link;
++	DWORD size;
++	DWORD type;
++	DWORD offset;
++	DWORD flags;
++	DWORD stroff;
++	DWORD id;
++	DWORD length;
++	BYTE filename[J4FS_NAME_LEN];
++} j4fs_header;
++
++
++/*
++  * device  : This field indicates the device (partition) number to be acted upon. Device can also be thought of as a partition. This field is STL partition id.
++  * status  : This field provides a mechanism to pass a detailed failure back to the application. Typical functions will place a detailed error in this field and
++                   return SUCCESS or FAILURE back to the calling function
++  * blocksize : This field should be initialized by the FlashDevMount function and provides a mechanism to allow multiple devices (partitions) with
++  *                  different Intel components (which may have different block sizes). This field should reflect the size of media that will be erased when
++  *                  one block is erased in Bytes.
++  * pagesize  : This field indicates the size of page in Bytes.
++  * numberblocks : This field indicates the number of blocks in the entire media. If their are two flash cards, each would be considered its own media.
++  *                         If the media is an RFA, each RFA is considered its own media
++  * j4fs_offset : This field indicates the beginning address of data area of the device (partition) in Bytes. This address follows the
++  *                     Media Status Table(MST) and MST starts from offset 0.
++  * j4fs_size : This value indicates the size of the device (partition) in Bytes.
++  * j4fs_end : This field indicates the address of the end of the current device(partition) in Bytes. The device(partition) starts from offset 0.
++  * aux : This field does not get initialized in the FlashDevMount function. It provides a mechanism to pass extra information to/from the low-level function set
++  */
++typedef struct {
++	DWORD device;
++	DWORD status;
++	DWORD blocksize;
++	DWORD pagesize;
++	DWORD numberblocks;
++	DWORD j4fs_offset;
++	DWORD j4fs_size;
++	DWORD j4fs_end;
++	DWORD j4fs_device_end;
++	DWORD aux;
++
++#ifdef __KERNEL__
++	struct semaphore grossLock;	/* Gross locking semaphore */
++#endif
++} j4fs_device_info;
++
++
++/*
++  * J4FS Media Status Table(MST)
++  * This structure is used for reclaim including POR. The MST will reserve one block and will be used during initialization and reclaim.
++  * This MST is intended to assist in making the J4FS more robust. It provides memory to store status updates when reclaim is occurring,
++  * so that the system may recover form an unexpected power-off. If (from,to,end) is all 0, no reclaim is needed or reclaim is done.(Initial state)
++       If (from,to,end) is not 0, reclaim is in progress and should reclaim-restart from 'from,to member'
++  * magic : J4FS_MAGIC
++  * from , to(Bytes) : copy from 'from offset' to 'to offset' (4096Bytes data).
++  * end(Bytes) : end offset of 'from offset'.
++  * offset(Bytes) : beginning offsets of new arranged valid files excluding invalid files
++  * offset_number : number of offset array
++  */
++typedef struct {
++	DWORD magic;
++	DWORD from;
++	DWORD to;
++	DWORD end;
++	DWORD copyed;
++	DWORD offset[J4FS_MAX_FILE_NUM];
++	DWORD offset_number;
++	DWORD status;
++	DWORD rw_start;
++} j4fs_mst;
++
++#ifdef J4FS_TRANSACTION_LOGGING
++/*
++  * transaction structure for j4fs crash debugging. size should be 512B.
++  */
++typedef struct {
++	DWORD offset;
++	DWORD opcode;
++	DWORD sequence;
++	DWORD magic;
++
++	DWORD ino;
++	DWORD index;
++	DWORD count;
++	DWORD reserved1;
++
++	DWORD b_link;
++	DWORD b_length;
++	DWORD a_link;
++	DWORD a_length;
++
++	BYTE filename[J4FS_NAME_LEN];
++	BYTE reserved2[336];
++} j4fs_transaction;
++
++#define J4FS_TRANSACTION_SIZE	512
++#endif
++
++extern int j4fs_close(void);
++
++#ifdef __KERNEL__
++extern ino_t j4fs_inode_by_name(struct inode * dir, struct dentry *dentry);
++extern struct inode *j4fs_alloc_inode(struct super_block *sb);
++extern void j4fs_destroy_inode(struct inode *inode);
++extern void j4fs_read_inode (struct inode * inode);
++extern int  j4fs_init(void);
++extern void print_j4fs_inode(struct j4fs_inode *raw_inode);
++extern int j4fs_get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_result,  int create);
++extern int j4fs_get_blocks(struct inode *inode, sector_t iblock, unsigned long maxblocks, struct buffer_head *bh_result,  int create);
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++extern int j4fs_permission(struct inode *inode, int mask);
++#else
++extern int j4fs_permission(struct inode *inode, int mask, struct nameidata *nd);
++#endif
++
++extern int j4fs_readpage_unlock(struct file *f, struct page *page);
++extern int j4fs_readpage_nolock(struct file *f, struct page *page);
++extern int j4fs_file_write(struct file *f, const char *buf, size_t n,loff_t *pos);
++extern int j4fs_hold_space(int size);
++
++extern void msleep(unsigned int msecs);
++
++extern const struct inode_operations j4fs_file_inode_operations;
++extern const struct file_operations j4fs_file_operations;
++extern const struct inode_operations j4fs_dir_inode_operations;
++extern const struct file_operations j4fs_dir_operations;
++extern const struct address_space_operations j4fs_aops;
++extern const struct super_operations j4fs_sops;
++
++static inline struct j4fs_inode_info *J4FS_I(struct inode *inode)
++{
++	return container_of(inode, struct j4fs_inode_info, vfs_inode);
++}
++#else
++extern int j4fs_test(void);
++extern int j4fs_open(void);
++#endif
++
++
++extern int fsd_open(j4fs_ctrl *);
++extern int fsd_close(j4fs_ctrl *);
++extern int fsd_read(j4fs_ctrl *);
++extern int fsd_write(j4fs_ctrl *);
++extern int fsd_delete(j4fs_ctrl *);
++extern int fsd_special(j4fs_ctrl *);
++extern int fsd_print_meta_data(void);
++extern int fsd_read_ro_header(void);
++extern int fsd_mark_invalid(void);
++extern int fsd_reclaim(void);
++extern int fsd_panic(void);
++extern int is_invalid_j4fs_rw_start(void);
++#ifdef J4FS_TRANSACTION_LOGGING
++extern int fsd_initialize_transaction(void);
++#endif
++
++extern int FlashDevRead(j4fs_device_info *dev_ptr, DWORD offset, DWORD length, BYTE *buffer);
++extern int FlashDevWrite(j4fs_device_info *dev_ptr, DWORD offset, DWORD length, BYTE *buffer);
++extern int FlashDevErase(j4fs_device_info *dev_ptr);
++extern int FlashDevMount(void);
++extern int FlashDevUnmount(void);
++extern int FlashDevSpecial(j4fs_device_info *dev_ptr, DWORD scmd);
++
++#ifdef __KERNEL__
++#define TOUT(p) printk p
++#else
++#define TOUT(p) printf p
++#endif
++
+diff --git a/drivers/samsung/j4fs/j4fs_kernel.c b/drivers/samsung/j4fs/j4fs_kernel.c
+new file mode 100644
+index 0000000..c0259ff
+--- /dev/null
++++ b/drivers/samsung/j4fs/j4fs_kernel.c
+@@ -0,0 +1,1525 @@
++/*
++ * j4fs_fs.c
++ *
++ * External interface to other kernel subsystems
++ *
++ * COPYRIGHT(C) Samsung Electronics Co.Ltd. 2009-2010 All Right Reserved.
++ *
++ * 2009.02 - First editing by SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ * 2009.03 - Currently managed by  SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ */
++#include <linux/time.h>
++#include <linux/highuid.h>
++#include <linux/pagemap.h>
++#include <linux/quotaops.h>
++#include <linux/module.h>
++#include <linux/writeback.h>
++#include <linux/buffer_head.h>
++#include <linux/mpage.h>
++#include <linux/slab.h>
++#include <linux/semaphore.h>
++#include "j4fs.h"
++
++#if defined(J4FS_USE_XSR)
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28))
++#include "./Inc/XsrTypes.h"
++#include "./Inc/STL.h"
++#else
++#include "../../drivers/txsr/Inc/XsrTypes.h"
++#include "../../drivers/txsr/Inc/STL.h"
++#endif
++
++#elif defined(J4FS_USE_FSR)
++
++#include "../../fsr/Inc/FSR.h"
++#include "../../fsr/Inc/FSR_STL.h"
++
++// J4FS for moviNAND merged from ROSSI
++#elif defined(J4FS_USE_MOVI)
++// J4FS for moviNAND merged from ROSSI
++#else
++'compile error'
++#endif
++
++
++#if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 27))
++#define J4FS_USE_WRITE_BEGIN_END 1
++#else
++#define J4FS_USE_WRITE_BEGIN_END 0
++#endif
++
++#define Page_Uptodate(page)	test_bit(PG_uptodate, &(page)->flags)
++
++extern j4fs_device_info device_info;
++extern unsigned int j4fs_traceMask;
++extern unsigned int j4fs_rw_start;
++extern int ro_j4fs_header_count;
++extern unsigned int j4fs_next_sequence;
++extern unsigned int j4fs_transaction_next_offset;
++extern int j4fs_panic;
++
++void j4fs_GrossLock(void)
++{
++	J4FS_T(J4FS_TRACE_LOCK, ("j4fs locking %p\n", current));
++	down(&device_info.grossLock);
++	J4FS_T(J4FS_TRACE_LOCK, ("j4fs locked %p\n", current));
++}
++
++void j4fs_GrossUnlock(void)
++{
++	J4FS_T(J4FS_TRACE_LOCK, ("j4fs unlocking %p\n", current));
++	up(&device_info.grossLock);
++}
++
++int j4fs_readpage(struct file *f, struct page *page)
++{
++	J4FS_T(J4FS_TRACE_FS_READ,("%s %d\n",__FUNCTION__,__LINE__));
++	return j4fs_readpage_unlock(f, page);
++}
++
++int j4fs_readpage_unlock(struct file *f, struct page *page)
++{
++	int ret = j4fs_readpage_nolock(f, page);
++	unlock_page(page);
++	return ret;
++}
++
++int j4fs_readpage_nolock(struct file *f, struct page *page)
++{
++	/* Lifted from yaffs2 */
++	unsigned char *page_buf;
++	int ret;
++	struct address_space *mapping = page->mapping;
++	struct inode *inode;
++	j4fs_ctrl ctl;
++
++	J4FS_T(J4FS_TRACE_FS_READ,("%s %d\n",__FUNCTION__,__LINE__));
++
++	BUG_ON(!PageLocked(page));
++
++	if (!mapping) BUG();
++
++	inode = mapping->host;
++
++	if (!inode) BUG();
++
++	page_buf = kmap(page);
++	/* FIXME: Can kmap fail? */
++
++	j4fs_GrossLock();
++
++	ctl.buffer=page_buf;
++	ctl.count=PAGE_CACHE_SIZE;
++	ctl.id=inode->i_ino;
++	ctl.index=page->index << PAGE_CACHE_SHIFT;
++	ret=fsd_read(&ctl);
++
++	j4fs_GrossUnlock();
++
++	if (ret >= 0)
++		ret = 0;
++
++	if (ret) {
++		ClearPageUptodate(page);
++		SetPageError(page);
++	} else {
++		SetPageUptodate(page);
++		ClearPageError(page);
++	}
++
++	flush_dcache_page(page);
++	kunmap(page);
++
++	return ret;
++}
++
++int j4fs_writepage(struct page *page, struct writeback_control *wbc)
++{
++	struct address_space *mapping = page->mapping;
++	loff_t offset = (loff_t) page->index << PAGE_CACHE_SHIFT;
++	struct inode *inode;
++	unsigned long end_index;
++	char *buffer;
++	int nWritten = 0;
++	unsigned nBytes;
++	j4fs_ctrl ctl;
++	int nErr;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	if (!mapping) BUG();
++
++	inode = mapping->host;
++
++	if (!inode) BUG();
++
++	if (offset > inode->i_size) {
++		J4FS_T(J4FS_TRACE_FS,
++			("j4fs_writepage at %08x, inode size = %08x!!!\n",
++			(unsigned)(page->index << PAGE_CACHE_SHIFT),
++			(unsigned)inode->i_size));
++		J4FS_T(J4FS_TRACE_FS,
++			("                -> don't care!!\n"));
++		unlock_page(page);
++		return 0;
++	}
++
++	end_index = inode->i_size >> PAGE_CACHE_SHIFT;
++
++	/* easy case */
++	if (page->index < end_index)
++		nBytes = PAGE_CACHE_SIZE;
++	else
++		nBytes = inode->i_size & (PAGE_CACHE_SIZE - 1);
++
++	get_page(page);
++
++	buffer = kmap(page);
++
++	j4fs_GrossLock();
++
++	J4FS_T(J4FS_TRACE_FS,
++		("j4fs_writepage: index=%08x,nBytes=%08x,inode.i_size=%05x\n", (unsigned)(page->index << PAGE_CACHE_SHIFT), nBytes,(int)inode->i_size));
++
++	// write file
++	ctl.buffer=buffer;
++	ctl.count=nBytes;
++	ctl.id=inode->i_ino;
++	ctl.index=offset;
++
++	nErr=fsd_write(&ctl);
++
++	if(nErr==J4FS_RETRY_WRITE) nErr=fsd_write(&ctl);
++
++	J4FS_T(J4FS_TRACE_FS,
++		("j4fs_writepage: index=%08x,nBytes=%08x,inode.i_size=%05x\n", (unsigned)(page->index << PAGE_CACHE_SHIFT), nBytes,(int)inode->i_size));
++
++	j4fs_GrossUnlock();
++
++	kunmap(page);
++	SetPageUptodate(page);
++	unlock_page(page);
++	put_page(page);
++
++	return (nWritten == nBytes) ? 0 : -ENOSPC;
++
++}
++
++#if (J4FS_USE_WRITE_BEGIN_END > 0)
++int j4fs_write_begin(struct file *filp, struct address_space *mapping,
++				loff_t pos, unsigned len, unsigned flags,
++				struct page **pagep, void **fsdata)
++{
++	struct page *pg = NULL;
++	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
++	uint32_t offset = pos & (PAGE_CACHE_SIZE - 1);
++	uint32_t to = offset + len;
++
++	int ret = 0;
++	int space_held = 0;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	J4FS_T(J4FS_TRACE_FS, ("start j4fs_write_begin\n"));
++
++	if(to>PAGE_CACHE_SIZE) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: page size overflow(pos,index,offset,len,to)=(%lld,%lu,%u,%d,%d)\n",__FUNCTION__,__LINE__,pos,index,offset,len,to));
++		j4fs_panic("page size overflow");
++		return -ENOSPC;
++	}
++
++	/* Get a page */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++	pg = grab_cache_page_write_begin(mapping, index, flags);
++#else
++	pg = __grab_cache_page(mapping, index);
++#endif
++
++	*pagep = pg;
++	if (!pg) {
++		ret =  -ENOMEM;
++		goto out;
++	}
++
++	/* Get fs space */
++	space_held = j4fs_hold_space(PAGE_CACHE_SIZE);
++
++	if (!space_held) {
++		ret = -ENOSPC;
++		goto out;
++	}
++
++	/* Update page if required */
++	if (!Page_Uptodate(pg) && (offset || to < PAGE_CACHE_SIZE))
++		ret = j4fs_readpage_nolock(filp, pg);
++
++	if (ret)
++		goto out;
++
++	/* Happy path return */
++	J4FS_T(J4FS_TRACE_FS, ("end j4fs_write_begin - ok\n"));
++
++	return 0;
++
++out:
++	J4FS_T(J4FS_TRACE_FS, ("end j4fs_write_begin fail returning %d\n", ret));
++
++	if (pg) {
++		unlock_page(pg);
++		page_cache_release(pg);
++	}
++	return ret;
++}
++
++#else
++
++int j4fs_prepare_write(struct file *f, struct page *pg,
++				unsigned offset, unsigned to)
++{
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	J4FS_T(J4FS_TRACE_FS, ("\nj4fs_prepare_write\n"));
++
++	if(to>PAGE_CACHE_SIZE) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: page size overflow(offset,to)=(%d,%d)\n",__FUNCTION__,__LINE__,offset,to));
++		j4fs_panic("page size overflow");
++		return -ENOSPC;
++	}
++
++	if (!Page_Uptodate(pg) && (offset || to < PAGE_CACHE_SIZE))
++		return j4fs_readpage_nolock(f, pg);
++	return 0;
++}
++#endif
++
++#if (J4FS_USE_WRITE_BEGIN_END > 0)
++int j4fs_write_end(struct file *filp, struct address_space *mapping,
++				loff_t pos, unsigned len, unsigned copied,
++				struct page *pg, void *fsdadata)
++{
++	int ret = 0;
++	void *addr, *kva;
++	uint32_t offset_into_page = pos & (PAGE_CACHE_SIZE - 1);
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	if(offset_into_page+copied > PAGE_CACHE_SIZE) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: page size overflow(offset_into_page,copied)=(%d,%d)\n",__FUNCTION__,__LINE__,offset_into_page, copied));
++		j4fs_panic("page size overflow");
++		return -ENOSPC;
++	}
++
++	kva = kmap(pg);
++	addr = kva + offset_into_page;
++
++	J4FS_T(J4FS_TRACE_FS,
++		("j4fs_write_end addr %x pos %x nBytes %d\n",
++		(unsigned) addr,
++		(int)pos, copied));
++
++	ret = j4fs_file_write(filp, addr, copied, &pos);
++
++	if (ret != copied) {
++		J4FS_T(J4FS_TRACE_ALWAYS, ("j4fs_write_end not same size ret %d  copied %d\n", ret, copied));
++		SetPageError(pg);
++		ClearPageUptodate(pg);
++	} else {
++		SetPageUptodate(pg);
++	}
++
++	kunmap(pg);
++
++	unlock_page(pg);
++	page_cache_release(pg);
++	return ret;
++}
++#else
++
++int j4fs_commit_write(struct file *f, struct page *pg, unsigned offset, unsigned to)
++{
++	void *addr, *kva;
++
++	loff_t pos = (((loff_t) pg->index) << PAGE_CACHE_SHIFT) + offset;
++	int nBytes = to - offset;
++	int nWritten;
++
++	unsigned spos = pos;
++	unsigned saddr;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	if(offset+nBytes > PAGE_CACHE_SIZE) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: page size overflow(offset,nBytes)=(%d,%d)\n",__FUNCTION__,__LINE__, offset, nBytes));
++		j4fs_panic("page size overflow");
++		return -ENOSPC;
++	}
++
++	kva = kmap(pg);
++	addr = kva + offset;
++
++	saddr = (unsigned) addr;
++
++	J4FS_T(J4FS_TRACE_FS, ("j4fs_commit_write: (addr,pos,nBytes)=(0x%x, 0x%x, 0x%x)\n", saddr, spos, nBytes));
++
++	nWritten = j4fs_file_write(f, addr, nBytes, &pos);
++
++	if (nWritten != nBytes) {
++		J4FS_T(J4FS_TRACE_ALWAYS, ("j4fs_commit_write: (nWritten,nBytes)=(0x%x 0x%x)\n", nWritten, nBytes));
++		SetPageError(pg);
++		ClearPageUptodate(pg);
++	} else {
++		SetPageUptodate(pg);
++	}
++
++	kunmap(pg);
++
++	return nWritten == nBytes ? 0 : nWritten;
++}
++#endif
++
++int j4fs_file_write(struct file *f, const char *buf, size_t n, loff_t *pos)
++{
++	int nWritten, ipos;
++	struct inode *inode;
++	j4fs_ctrl ctl;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return -ENOSPC;
++	}
++
++	j4fs_GrossLock();
++
++	inode = f->f_dentry->d_inode;
++
++	if (!S_ISBLK(inode->i_mode) && f->f_flags & O_APPEND)
++		ipos = inode->i_size;
++	else
++		ipos = *pos;
++
++	J4FS_T(J4FS_TRACE_FS,("j4fs_file_write: %zu bytes to ino %ld at %d\n", n, inode->i_ino, ipos));
++
++	// write file
++	ctl.buffer=(BYTE *)buf;
++	ctl.count=n;
++	ctl.id=inode->i_ino;
++	ctl.index=ipos;
++
++	nWritten=fsd_write(&ctl);
++
++	if(nWritten==J4FS_RETRY_WRITE) nWritten=fsd_write(&ctl);
++
++	if(nWritten==J4FS_RETRY_WRITE || error(nWritten))
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nWritten=0x%x)\n",__FUNCTION__,__LINE__,nWritten));
++		j4fs_GrossUnlock();
++		return -ENOSPC;
++	}
++
++	if (nWritten > 0) {
++		ipos += nWritten;
++		*pos = ipos;
++		if (ipos > inode->i_size) {
++			inode->i_size = ipos;
++			inode->i_blocks = (ipos + 511) >> 9;
++		}
++
++	}
++	j4fs_GrossUnlock();
++	return nWritten == 0 ? -ENOSPC : nWritten;
++}
++
++struct j4fs_inode *j4fs_get_inode(struct super_block *sb, ino_t ino)
++{
++	unsigned int cur_link, latest_matching_offset=0xffffffff;
++	struct j4fs_inode *raw_inode;
++	int nErr;
++	BYTE *buf;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		goto error1;
++	}
++
++	if (ino != J4FS_ROOT_INO && ino < J4FS_FIRST_INO) goto Einval;
++
++	if(ino==J4FS_ROOT_INO) goto error1;
++
++	// read j4fs_header in flash which inode number is ino
++	cur_link=device_info.j4fs_offset;
++	while(cur_link!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(cur_link);
++
++		nErr = FlashDevRead(&device_info, cur_link, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(raw_inode->i_type!=J4FS_FILE_TYPE)
++		{
++			// There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.
++			if(cur_link==device_info.j4fs_offset) {
++				j4fs_panic("There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// check whether this file was deleted
++		if ((raw_inode->i_flags&0x1)==((raw_inode->i_flags&0x2)>>1)) {
++			if(raw_inode->i_id==ino) latest_matching_offset=cur_link;
++		}
++
++		cur_link=raw_inode->i_link;
++	}
++
++	if(latest_matching_offset!=0xffffffff)
++	{
++		nErr = FlashDevRead(&device_info, latest_matching_offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *)buf;
++		return raw_inode;
++	}
++
++Einval:
++	J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(bad inode number: %lu)\n",__FUNCTION__,__LINE__,(unsigned long) ino));
++	kfree(buf);
++	return ERR_PTR(-EINVAL);
++
++error1:
++	kfree(buf);
++	return NULL;
++
++}
++
++void j4fs_read_inode (struct inode * inode)
++{
++	struct j4fs_inode_info *ei = J4FS_I(inode);
++	ino_t ino = inode->i_ino;
++	struct j4fs_inode * raw_inode;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	// root inode
++	if(ino==J4FS_ROOT_INO)
++	{
++		inode->i_size = 0;
++		inode->i_mode=S_IFDIR|S_IWUSR|S_IRUGO|S_IXUGO;
++
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 29))
++	inode->i_uid=current->fsuid;
++	inode->i_gid=current->fsgid;
++#else
++	inode->i_uid=current->cred->fsuid;
++	inode->i_gid=current->cred->fsgid;
++#endif
++
++		strcpy(ei->i_filename,"/");
++		ei->i_link=device_info.j4fs_offset;
++		ei->i_type=J4FS_FILE_TYPE;
++		ei->i_flags=0x3;
++		ei->i_id=J4FS_ROOT_INO;
++		ei->i_length=0;
++
++		inode->i_op = &j4fs_dir_inode_operations;
++		inode->i_mapping->a_ops = &j4fs_aops;
++		inode->i_fop = &j4fs_dir_operations;
++
++		return;
++	}
++
++	raw_inode = j4fs_get_inode(inode->i_sb, ino);
++
++	if (IS_ERR(raw_inode))
++ 		goto bad_inode;
++
++	inode->i_size = le32_to_cpu(raw_inode->i_length);
++	inode->i_mode=S_IFREG|S_IWUGO|S_IRUGO|S_IXUGO;
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 29))
++	inode->i_uid=current->fsuid;
++	inode->i_gid=current->fsgid;
++#else
++	inode->i_uid=current->cred->fsuid;
++	inode->i_gid=current->cred->fsgid;
++#endif
++
++	strcpy(ei->i_filename,raw_inode->i_filename);
++	ei->i_link=raw_inode->i_link;
++	ei->i_type=raw_inode->i_type;
++	ei->i_flags=raw_inode->i_flags;
++	ei->i_id=raw_inode->i_id;
++	ei->i_length=raw_inode->i_length;
++
++	if (S_ISREG(inode->i_mode)) {
++		inode->i_op = &j4fs_file_inode_operations;
++		inode->i_mapping->a_ops = &j4fs_aops;
++		inode->i_fop = &j4fs_file_operations;
++	}
++
++	kfree(raw_inode);
++	inode->i_flags |= S_SYNC;
++	return;
++
++bad_inode:
++	make_bad_inode(inode);
++}
++
++// TODO : Consider 'dir'
++ino_t j4fs_inode_by_name(struct inode * dir, struct dentry *dentry)
++{
++	unsigned int cur_link;
++	struct j4fs_inode_info *ei = J4FS_I(dir);
++	struct j4fs_inode *raw_inode;
++	ino_t ino;
++	int nErr;
++	BYTE *buf;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return 0;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++
++	cur_link=ei->i_link;
++	while(cur_link!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(cur_link);
++
++		nErr = FlashDevRead(&device_info, cur_link, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *) buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(raw_inode->i_type!=J4FS_FILE_TYPE)
++		{
++			// There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.
++			if(cur_link==ei->i_link) {
++				j4fs_panic("There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// check whether this file was deleted
++		if ((raw_inode->i_flags&0x1)==((raw_inode->i_flags&0x2)>>1)) {
++			if(!strcmp(raw_inode->i_filename, dentry->d_name.name))
++			{
++				ino = raw_inode->i_id;
++				kfree(buf);
++				return ino;
++			}
++		}
++
++		cur_link=raw_inode->i_link;
++	}
++
++error1:
++	kfree(buf);
++
++	return 0;
++
++}
++
++int j4fs_readdir (struct file * filp, void * dirent, filldir_t filldir)
++{
++	unsigned int curoffs, offset, cur_link;
++	struct inode *inode = filp->f_dentry->d_inode;
++	struct j4fs_inode_info *ei = J4FS_I(inode);
++	struct j4fs_inode *raw_inode;
++	int i,j, nErr;
++	BYTE *buf;
++	DWORD valid_offset[128][2];
++	int count=0;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return 0;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++
++	j4fs_GrossLock();
++
++	offset = filp->f_pos;
++
++	if (offset == 0) {
++		nErr=filldir(dirent, ".", 1, offset, filp->f_dentry->d_inode->i_ino, DT_DIR);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++		offset++;
++		filp->f_pos++;
++	}
++
++	if (offset == 1) {
++		nErr=filldir(dirent, "..", 2, offset,filp->f_dentry->d_parent->d_inode->i_ino, DT_DIR);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++		offset++;
++		filp->f_pos++;
++	}
++
++	curoffs = 1;
++
++	cur_link=ei->i_link;
++	while(cur_link!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(cur_link);
++
++		nErr = FlashDevRead(&device_info, cur_link, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *) buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(raw_inode->i_type!=J4FS_FILE_TYPE)
++		{
++			// There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.
++			if(cur_link==ei->i_link) {
++				j4fs_panic("There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// check whether this file was deleted
++		if ((raw_inode->i_flags&0x1)==((raw_inode->i_flags&0x2)>>1)) {
++			valid_offset[count][0]=raw_inode->i_id;
++			valid_offset[count][1]=cur_link;
++			count++;
++		}
++		cur_link=raw_inode->i_link;
++	}
++
++	// TODO: we exclude last object header because last object header can't decide invalidation of old files. Is it right ???
++	// Add files(latest valid object) to directory entry
++	for(i=0;i<count;i++)
++	{
++		for(j=i+1;j<count;j++)
++		{
++			// If inode number is same, valid_offset[i] is invalid
++			if(valid_offset[i][0]==valid_offset[j][0]) break;
++		}
++
++		// Add latest valid object to directory entry
++		if(j==count)
++		{
++			curoffs++;
++			if(curoffs >= offset)
++			{
++				nErr = FlashDevRead(&device_info, valid_offset[i][1], J4FS_BASIC_UNIT_SIZE, buf);
++				if (nErr != 0) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++			   		goto error1;
++				}
++
++				raw_inode = (struct j4fs_inode *) buf;
++
++				nErr=filldir(dirent, raw_inode->i_filename, strlen(raw_inode->i_filename), offset, raw_inode->i_id, DT_REG);
++
++				if(nErr <0) {
++					J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%08x,filename=%s, file length=%d)\n",__FUNCTION__,__LINE__,nErr,raw_inode->i_filename, strlen(raw_inode->i_filename)));
++					goto error1;
++				}
++				else
++				{
++					J4FS_T(J4FS_TRACE_FS,("%s %d: success(filename=%s, file length=%d)\n",__FUNCTION__,__LINE__,raw_inode->i_filename, strlen(raw_inode->i_filename)));
++					offset++;
++					filp->f_pos++;
++				}
++			}
++		}
++	}
++
++error1:
++	kfree(buf);
++	j4fs_GrossUnlock();
++	return 0;
++}
++
++
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++int j4fs_permission(struct inode *inode, int mask)
++#else
++int j4fs_permission(struct inode *inode, int mask, struct nameidata *nd)
++#endif
++{
++	return 0;
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++struct inode *j4fs_iget(struct super_block *sb, unsigned long ino)
++{
++	struct inode * inode;
++	inode = iget_locked(sb, ino);
++
++	if (!inode)
++		return ERR_PTR(-ENOMEM);
++
++	if (!(inode->i_state & I_NEW))
++		return inode;
++
++	j4fs_read_inode(inode);
++	unlock_new_inode(inode);
++	return inode;
++}
++#endif
++
++struct dentry *j4fs_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
++{
++	struct inode * inode;
++	ino_t ino;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d:(filename=%s)\n",__FUNCTION__,__LINE__,dentry->d_name.name));
++
++	if (dentry->d_name.len > J4FS_NAME_LEN)
++		return ERR_PTR(-ENAMETOOLONG);
++
++	ino = j4fs_inode_by_name(dir, dentry);
++	inode = NULL;
++	if (ino) {
++	#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++		inode = j4fs_iget(dir->i_sb, ino);
++	#else
++		inode = iget(dir->i_sb, ino);
++	#endif
++		if (!inode)
++			return ERR_PTR(-EACCES);
++	}
++	return d_splice_alias(inode, dentry);
++}
++
++struct inode *j4fs_new_inode(struct inode *dir, struct dentry *dentry, int mode)
++{
++	struct super_block *sb;
++	struct inode * inode;
++	struct j4fs_inode_info *ei;
++	unsigned int offset, last_object_offset=0xffffffff, new_object_offset=0xffffffff;
++	struct j4fs_inode *raw_inode=0;
++	ino_t ino = J4FS_FIRST_INO-1;
++	int nErr;
++	BYTE *buf;
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	j4fs_transaction *transaction;
++#endif
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return NULL;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	// allocate new inode
++	sb = dir->i_sb;
++	inode = new_inode(sb);
++	if (!inode) {
++		return ERR_PTR(-ENOMEM);
++	}
++
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	transaction=kmalloc(J4FS_TRANSACTION_SIZE,GFP_NOFS);
++#endif
++
++	ei = J4FS_I(inode);
++
++	if(is_invalid_j4fs_rw_start())
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error! j4fs_rw_start is invalid(j4fs_rw_start=0x%08x, j4fs_end=0x%08x, ro_j4fs_header_count=0x%08x)\n",
++			__FUNCTION__, __LINE__, j4fs_rw_start, device_info.j4fs_end, ro_j4fs_header_count));
++		j4fs_panic("j4fs_rw_start is invalid");
++		goto error1;
++	}
++
++	// find existing largest inode number
++	// TODO: 1. RO files --> use ro_j4fs_header buffer
++	offset=device_info.j4fs_offset;
++	while(offset!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(offset);
++
++		// read j4fs_header
++		nErr = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode 	= (struct j4fs_inode *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(raw_inode->i_type!=J4FS_FILE_TYPE)
++		{
++			// There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.
++			if(offset==device_info.j4fs_offset) {
++				j4fs_panic("There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.");
++				goto error1;;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		// check whether this file was deleted
++		if ((raw_inode->i_flags&0x1)==((raw_inode->i_flags&0x2)>>1)) {
++			if(raw_inode->i_id>ino) ino=raw_inode->i_id;
++		}
++
++		last_object_offset=offset;
++		offset=raw_inode->i_link;
++	}
++
++	// set inode number
++	ino++;
++
++	ei->i_id=ino;
++	inode->i_ino = ino;
++	inode->i_mode=S_IFREG|S_IWUGO|S_IRUGO|S_IXUGO;
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 29))
++	inode->i_uid=current->fsuid;
++	inode->i_gid=current->fsgid;
++#else
++	inode->i_uid=current->cred->fsuid;
++	inode->i_gid=current->cred->fsgid;
++#endif
++	inode->i_op = &j4fs_file_inode_operations;
++	inode->i_mapping->a_ops = &j4fs_aops;
++	inode->i_fop = &j4fs_file_operations;
++	inode->i_flags |= S_SYNC;
++
++	if(last_object_offset!=0xffffffff)
++	{
++		J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++		new_object_offset=last_object_offset;
++		new_object_offset+=J4FS_BASIC_UNIT_SIZE;	// j4fs_header
++		new_object_offset+=raw_inode->i_length;	// data
++		new_object_offset=(new_object_offset+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// J4FS_BASIC_UNIT_SIZE align
++	}
++	else	//there are no files in this partition, so write first offset of partition
++	{
++		j4fs_panic("There are no files in this partition. There should be one file in j4fs file system at least");
++		goto error1;
++	}
++
++	if((new_object_offset+J4FS_BASIC_UNIT_SIZE-1)>device_info.j4fs_end)
++	{
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: partition size overflow(new_object_offset=0x%08x, j4fs_end=0x%08x)\n",__FUNCTION__,__LINE__,new_object_offset,device_info.j4fs_end));
++		goto error1;
++	}
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	// setting transaction variable
++	memset(transaction,0xff,J4FS_TRANSACTION_SIZE);
++	transaction->magic=J4FS_MAGIC;
++	transaction->sequence=j4fs_next_sequence++;
++	transaction->ino=ino;
++	memcpy(transaction->filename,dentry->d_name.name,dentry->d_name.len);
++	transaction->filename[dentry->d_name.len]=0;
++	transaction->opcode=J4FS_LAST_OBJECT_CREATE_STEP1;
++	transaction->offset=new_object_offset;
++	transaction->b_link=transaction->a_link=0xffffffff;
++	transaction->b_length=transaction->a_length=0;
++
++	nErr = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++	if (error(nErr)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++   		goto error1;
++	}
++
++	j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++	if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++#endif
++
++	// add new object(j4fs_header)
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++	memset(buf, 0xff, J4FS_BASIC_UNIT_SIZE);
++	raw_inode = (struct j4fs_inode *)buf;
++	raw_inode->i_link=0xffffffff;
++	raw_inode->i_type=J4FS_FILE_TYPE;
++	raw_inode->i_flags=0x3;
++	raw_inode->i_id=ino;
++	raw_inode->i_length=0;
++	memcpy(raw_inode->i_filename, dentry->d_name.name, dentry->d_name.len);
++	raw_inode->i_filename[dentry->d_name.len]=0;
++
++	nErr = FlashDevWrite(&device_info, new_object_offset, J4FS_BASIC_UNIT_SIZE, buf);
++	if (nErr != 0) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++   		goto error1;
++	}
++
++	// update last_inode
++	if(last_object_offset!=0xffffffff)
++	{
++		J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++		nErr = FlashDevRead(&device_info, last_object_offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *)buf;
++
++
++	#ifdef J4FS_TRANSACTION_LOGGING
++		// setting transaction variable
++		memset(transaction,0xff,J4FS_TRANSACTION_SIZE);
++		transaction->magic=J4FS_MAGIC;
++		transaction->sequence=j4fs_next_sequence++;
++		transaction->ino=raw_inode->i_id;
++		strcpy(transaction->filename,raw_inode->i_filename);
++		transaction->opcode=J4FS_LAST_OBJECT_CREATE_STEP2;
++		transaction->offset=last_object_offset;
++		transaction->b_link=raw_inode->i_link;
++		transaction->a_link=new_object_offset;
++		transaction->b_length=transaction->a_length=raw_inode->i_length;
++
++		nErr = FlashDevWrite(&device_info, j4fs_transaction_next_offset, J4FS_TRANSACTION_SIZE, (BYTE *)transaction);
++
++		if (error(nErr)) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		j4fs_transaction_next_offset+=J4FS_TRANSACTION_SIZE;
++		if(j4fs_transaction_next_offset>=device_info.j4fs_device_end) j4fs_transaction_next_offset=device_info.j4fs_end;
++	#endif
++
++		raw_inode->i_link=new_object_offset;
++
++		nErr = FlashDevWrite(&device_info, last_object_offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++	}
++
++	kfree(buf);
++	return inode;
++
++error1:
++	kfree(buf);
++#ifdef J4FS_TRANSACTION_LOGGING
++	kfree(transaction);
++#endif
++	return NULL;
++}
++
++
++/*
++ *	Parent is locked.
++ */
++int j4fs_add_link (struct dentry *dentry, struct inode *inode)
++{
++	// write j4fs_header
++	// TODO
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	return 0;
++
++}
++
++int j4fs_add_nondir(struct dentry *dentry, struct inode *inode)
++{
++	int err;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	err= j4fs_add_link(dentry, inode);
++	if (!err) {
++		d_instantiate(dentry, inode);
++		return 0;
++	}
++	inode_dec_link_count(inode);
++	iput(inode);
++	return err;
++}
++
++/*
++ * By the time this is called, we already have created
++ * the directory cache entry for the new file, but it
++ * is so far negative - it has no inode.
++ * This function is call by do_filp_open()->open_namei()->open_namei_create()->vfs_create()->dir->i_op->create()
++ *
++ * If the create succeeds, we fill in the inode information
++ * with d_instantiate().
++ */
++int j4fs_create (struct inode * dir, struct dentry * dentry, int mode, struct nameidata *nd)
++{
++	struct inode * inode;
++	int err=-1;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return err;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	inode = j4fs_new_inode(dir, dentry, mode);
++
++	if (!IS_ERR(inode)) {
++		inode->i_op = &j4fs_file_inode_operations;
++		inode->i_mapping->a_ops = &j4fs_aops;
++		inode->i_fop = &j4fs_file_operations;
++
++		//mark_inode_dirty(inode);
++		err = j4fs_add_nondir(dentry, inode);
++	}
++	return err;
++}
++
++/* Space holding and freeing is done to ensure we have space available for write_begin/end */
++/* For now we just assume few parallel writes and check against a small number. */
++/* Todo: need to do this with a counter to handle parallel reads better */
++
++int j4fs_hold_space(int size)
++{
++	unsigned int offset, last_object_offset=0xffffffff, new_object_offset=0xffffffff;
++	struct j4fs_inode *raw_inode=NULL;
++	int nErr;
++	BYTE *buf;
++
++	if(j4fs_panic==1) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: j4fs panic\n",__FUNCTION__,__LINE__));
++		return 0;
++	}
++
++	buf=kmalloc(J4FS_BASIC_UNIT_SIZE,GFP_NOFS);
++
++	// find existing largest inode number
++	offset=device_info.j4fs_offset;
++	while(offset!=0xffffffff)
++	{
++		// check the partition range
++		j4fs_check_partition_range(offset);
++
++		// read j4fs_header
++		nErr = FlashDevRead(&device_info, offset, J4FS_BASIC_UNIT_SIZE, buf);
++		if (nErr != 0) {
++			J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error(nErr=0x%x)\n",__FUNCTION__,__LINE__,nErr));
++	   		goto error1;
++		}
++
++		raw_inode = (struct j4fs_inode *)buf;
++
++		//This j4fs_header cannot be interpreted. It means there are no files in this partition(this can happen and this is a normal case) or
++		//this j4fs partition is crashed(this should not happen).
++		if(raw_inode->i_type!=J4FS_FILE_TYPE)
++		{
++			// There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.
++			if(offset==device_info.j4fs_offset) {
++				j4fs_panic("There are no files in this partition or this first j4fs_header is crashed. So, this case should not happen and/or should be repaired.");
++				goto error1;
++			}
++
++			// This j4fs partition is crashed by some abnormal cause. This should not happen and should be repaired.
++			j4fs_panic("this j4fs partition is crashed by some abnormal cause.  This should not happen and should be repaired.");
++			goto error1;
++		}
++
++		last_object_offset=offset;
++		offset=raw_inode->i_link;
++	}
++
++	if(last_object_offset!=0xffffffff)
++	{
++		J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++		new_object_offset=last_object_offset;
++		new_object_offset+=J4FS_BASIC_UNIT_SIZE;	// j4fs_header
++		new_object_offset+=raw_inode->i_length;	// data
++		new_object_offset=(new_object_offset+J4FS_BASIC_UNIT_SIZE-1)/J4FS_BASIC_UNIT_SIZE*J4FS_BASIC_UNIT_SIZE;	// 4096 align
++	}
++
++	kfree(buf);
++	if((new_object_offset+size-1)>device_info.j4fs_end) return 0;
++	else return 1;
++
++error1:
++	kfree(buf);
++	return 0;
++}
++
++int j4fs_fill_super(struct super_block *sb, void *data, int silent)
++{
++	struct j4fs_sb_info * sbi;
++	struct j4fs_super_block * es;
++	struct inode *root;
++	u32 ret;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	sbi = kzalloc(sizeof(*sbi), GFP_NOFS);
++	if (!sbi)
++		return -ENOMEM;
++
++	es=kzalloc(sizeof(*es), GFP_NOFS);
++	if (!es)
++	{
++		kfree(sbi);	
++		return -ENOMEM;
++	}
++
++	sb->s_fs_info = sbi;
++	sbi->s_es = es;
++	sbi->s_first_ino=J4FS_FIRST_INO;
++
++	// Block size is J4FS_BASIC_UNIT_SIZE (4096)
++	sb->s_flags = 0;
++	sb->s_maxbytes = 0xffffffff;
++
++	sb->s_blocksize=J4FS_BASIC_UNIT_SIZE;
++	sb->s_blocksize_bits=J4FS_BASIC_UNIT_SIZE_BITS;
++	sb->s_op = &j4fs_sops;
++	sb->s_xattr = NULL;
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++	root=j4fs_iget(sb, J4FS_ROOT_INO);
++#else
++	root = iget(sb, J4FS_ROOT_INO);
++#endif
++
++	sb->s_root = d_alloc_root(root);
++
++	// Set device_info.j4fs_end using STLInfo.nTotalLogScts
++#if defined(J4FS_USE_XSR)
++	ret = STL_IOCtl(0, device_info.device, STL_IOCTL_LOG_SECTS, NULL, sizeof(u32), &tmp, sizeof(u32), &len); 
++#elif defined(J4FS_USE_FSR)
++	ret = FSR_STL_IOCtl(0, device_info.device, FSR_STL_IOCTL_LOG_SECTS, NULL, sizeof(u32), &tmp, sizeof(u32), &len); 
++#endif
++
++#if defined(J4FS_USE_XSR) || defined(J4FS_USE_FSR)
++	if (ret) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(0x%08x)\n",__FUNCTION__,__LINE__,ret));
++		return -EINVAL;
++	}
++
++	// j4fs transaction(1 block) for fils system crash debugging
++	// J4FS_BASIC_UNIT_SIZE align
++	device_info.j4fs_device_end=((tmp/(J4FS_BASIC_UNIT_SIZE/512))*(J4FS_BASIC_UNIT_SIZE/512))*512-1;
++	device_info.j4fs_end=device_info.j4fs_device_end-PHYSICAL_BLOCK_SIZE;
++
++// J4FS for moviNAND merged from ROSSI
++#elif defined(J4FS_USE_MOVI)
++	// j4fs transaction(1 block) for fils system crash debugging
++	// J4FS_BASIC_UNIT_SIZE align
++	device_info.j4fs_device_end=(((J4FS_BLOCK_COUNT * 512)/(J4FS_BASIC_UNIT_SIZE/512))*(J4FS_BASIC_UNIT_SIZE/512))*512-1;
++	device_info.j4fs_end=device_info.j4fs_device_end-PHYSICAL_BLOCK_SIZE;
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d: device_info.j4fs_end=0x%08x, device_info.j4fs_device_end=0x%08x\n",__FUNCTION__,__LINE__,device_info.j4fs_end,device_info.j4fs_device_end));
++
++	if (!sb->s_root) {
++		iput(root);
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: error\n",__FUNCTION__,__LINE__));
++		goto failed;
++	}
++
++	sema_init(&device_info.grossLock, 1);
++
++#ifdef J4FS_TRANSACTION_LOGGING
++	ret=fsd_initialize_transaction();
++
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto failed;
++	}
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d: j4fs_next_sequence=0x%08x, j4fs_transaction_next_offset=0x%08x\n",__FUNCTION__,__LINE__,j4fs_next_sequence,j4fs_transaction_next_offset));
++#endif
++
++	ret=fsd_reclaim();
++
++	if (error(ret)) {
++		J4FS_T(J4FS_TRACE_ALWAYS,("%s %d: Error(nErr=0x%08x)\n",__FUNCTION__,__LINE__,ret));
++   		goto failed;
++	}
++
++	return 0;
++
++failed:
++	sb->s_fs_info = NULL;
++	kfree(sbi);
++	kfree(es);
++	return -EINVAL;
++}
++
++struct dentry* j4fs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
++{
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	return mount_bdev(fs_type, flags, dev_name, data, j4fs_fill_super);
++}
++
++struct kmem_cache * j4fs_inode_cachep;
++
++struct inode *j4fs_alloc_inode(struct super_block *sb)
++{
++	struct j4fs_inode_info *ei;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	ei = (struct j4fs_inode_info *)kmem_cache_alloc(j4fs_inode_cachep, GFP_NOFS);
++	if (!ei)
++		return NULL;
++
++	ei->vfs_inode.i_version = 1;
++	return &ei->vfs_inode;
++}
++
++void j4fs_destroy_inode(struct inode *inode)
++{
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	kmem_cache_free(j4fs_inode_cachep, J4FS_I(inode));
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28)
++void init_once(void *foo)
++#else
++void init_once(struct kmem_cache * cachep, void *foo)
++#endif
++{
++	struct j4fs_inode_info *ei = (struct j4fs_inode_info *) foo;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	rwlock_init(&ei->i_meta_lock);
++	inode_init_once(&ei->vfs_inode);
++}
++
++int init_inodecache(void)
++{
++	j4fs_inode_cachep = kmem_cache_create("j4fs_inode_cache",
++					     sizeof(struct j4fs_inode_info),
++					     0, (SLAB_RECLAIM_ACCOUNT|
++						SLAB_MEM_SPREAD),
++					     init_once);
++	if (j4fs_inode_cachep == NULL)
++		return -ENOMEM;
++	return 0;
++}
++
++void destroy_inodecache(void)
++{
++	kmem_cache_destroy(j4fs_inode_cachep);
++}
++
++struct file_system_type j4fs_fs_type = {
++	.owner		= THIS_MODULE,
++	.name		= "j4fs",
++	.mount		= j4fs_mount,
++	.kill_sb	= kill_block_super,
++	.fs_flags	= FS_REQUIRES_DEV,
++};
++
++extern ssize_t (*lfs_read_module)(struct file *file, const char __user * buffer, size_t count, loff_t *ppos);
++extern ssize_t (*lfs_write_module)(struct file *file, const char __user * buffer, size_t count, loff_t *ppos);
++extern unsigned int j4fs_PORMask;
++extern unsigned int j4fs_PORCount;
++
++ssize_t lfs_read(struct file *file, const char __user * buffer, size_t count, loff_t *ppos)
++{
++	printk("%s %d: (j4fs_PORMask,j4fs_PORCount)=(%x,%d)\n",__FUNCTION__,__LINE__,j4fs_PORMask, j4fs_PORCount);
++	return 0;
++}
++
++ssize_t lfs_write(struct file *file, const char __user * buffer, size_t count, loff_t *ppos)
++{
++	char kbuf[1024];
++
++	if (copy_from_user(&kbuf, buffer, count))
++		return -EFAULT;
++
++	if (sscanf(kbuf, "%x %d", &j4fs_PORMask, &j4fs_PORCount) != 2)
++		return -EINVAL;
++
++	printk("%s %d: (j4fs_PORMask,j4fs_PORCount)=(%x,%d)\n",__FUNCTION__,__LINE__,j4fs_PORMask, j4fs_PORCount);
++	return -EINVAL;
++}
++
++int j4fs_fsync(struct file *file, int datasync)
++{
++	return 0;
++}
++
++int __init init_j4fs_fs(void)
++{
++	int err;
++	j4fs_ctrl ctl;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	err = init_inodecache();
++	if (err)
++		goto out1;
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++        err = register_filesystem(&j4fs_fs_type);
++	if (err)
++		goto out;
++
++#if 0
++	lfs_read_module=lfs_read;
++	lfs_write_module=lfs_write;
++#endif
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	// Initialize j4fs_device_info
++	ctl.scmd=J4FS_INIT;
++	fsd_special(&ctl);
++
++	J4FS_T(J4FS_TRACE_FS,("%s %d\n",__FUNCTION__,__LINE__));
++
++	return 0;
++out:
++	destroy_inodecache();
++out1:
++	return err;
++}
++
++void __exit exit_j4fs_fs(void)
++{
++// J4FS for moviNAND merged from ROSSI
++#if defined(J4FS_USE_MOVI)
++	j4fs_ctrl ctl;
++	
++	// Exit j4fs_device_info
++	ctl.scmd=J4FS_EXIT;
++	fsd_special(&ctl);
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++	unregister_filesystem(&j4fs_fs_type);
++	destroy_inodecache();
++}
++
++module_init(init_j4fs_fs)
++module_exit(exit_j4fs_fs)
++
++
++const struct address_space_operations j4fs_aops = {
++	.readpage		= j4fs_readpage,
++	.writepage		= j4fs_writepage,
++#if (J4FS_USE_WRITE_BEGIN_END > 0)
++	.write_begin = j4fs_write_begin,
++	.write_end = j4fs_write_end,
++#else
++	.prepare_write = j4fs_prepare_write,
++	.commit_write = j4fs_commit_write,
++#endif
++};
++
++const struct file_operations j4fs_file_operations = {
++	.read		= do_sync_read,
++	.write		= do_sync_write,
++	.aio_read	= generic_file_aio_read,
++	.aio_write	= generic_file_aio_write,
++	.open		= generic_file_open,
++	.llseek		= generic_file_llseek,
++	.fsync		= j4fs_fsync,
++};
++
++const struct file_operations j4fs_dir_operations = {
++	.llseek		= generic_file_llseek,
++	.read		= generic_read_dir,
++	.readdir		= j4fs_readdir,
++};
++
++const struct inode_operations j4fs_file_inode_operations = {
++	.permission = NULL,
++};
++
++const struct inode_operations j4fs_dir_inode_operations = {
++	.create		= j4fs_create,
++	.lookup		= j4fs_lookup,
++	.permission	= NULL,
++};
++
++const struct super_operations j4fs_sops = {
++	.alloc_inode	= j4fs_alloc_inode,
++	.destroy_inode	= j4fs_destroy_inode,
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 28)
++	.read_inode	= j4fs_read_inode,
++#endif
++};
++
+diff --git a/drivers/samsung/j4fs/llid_kernel.c b/drivers/samsung/j4fs/llid_kernel.c
+new file mode 100644
+index 0000000..23ab32b
+--- /dev/null
++++ b/drivers/samsung/j4fs/llid_kernel.c
+@@ -0,0 +1,240 @@
++/*
++ * llid.c
++ *
++ * Low-Level Interface Driver
++ *
++ * COPYRIGHT(C) Samsung Electronics Co.Ltd. 2009-2010 All Right Reserved.
++ *
++ * 2009.02 - First editing by SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ * 2009.03 - Currently managed by  SungHwan.yun <sunghwan.yun@samsung.com> @LDK@
++ *
++ */
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include "j4fs.h"
++
++#if defined(J4FS_USE_XSR)
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28))
++#include "./Inc/XsrTypes.h"
++#include "./Inc/STL.h"
++#else
++#include "../../drivers/txsr/Inc/XsrTypes.h"
++#include "../../drivers/txsr/Inc/STL.h"
++#endif
++
++#elif defined(J4FS_USE_FSR)
++
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 28))
++#include "../../fsr/Inc/FSR.h"
++#include "../../fsr/Inc/FSR_STL.h"
++#else
++#include "../fsr/Inc/FSR.h"
++#include "../fsr/Inc/FSR_STL.h"
++#endif
++
++// J4FS for moviNAND merged from ROSSI
++#elif defined(J4FS_USE_MOVI)
++/* j4fs device node name */
++#define J4FS_DEVNAME			"/dev/block/mmcblk0p1"
++static struct file *j4fs_filp;
++// J4FS for moviNAND merged from ROSSI
++
++#else
++'compile error'
++#endif
++
++extern j4fs_device_info device_info;
++extern unsigned int j4fs_traceMask;
++
++/*
++  * Fills the specified buffer with the number of bytes defined by length from the device's absolute physical address
++  * parameters
++  *   offset  : start physical page number
++  *   length  : bytes to write
++  *   buffer  : buffer to write data
++  * return value
++  *   The return code should indicate ERROR (1) or OK(0). If the return code indicates ERROR, the dev_ptr->status field should indicate
++  *   the return error code.
++  */
++int FlashDevRead(j4fs_device_info *dev_ptr, DWORD offset, DWORD length, BYTE *buffer)
++{
++	int ret=-1;
++#if defined(J4FS_USE_XSR) || defined(J4FS_USE_FSR)
++	DWORD nVol=0;
++	int part_id=dev_ptr->device;
++#endif
++// J4FS for moviNAND merged from ROSSI
++#ifdef J4FS_USE_MOVI
++	mm_segment_t oldfs;
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++#if defined(J4FS_USE_XSR)
++	ret = STL_Read(nVol, part_id, offset/512, length/512, buffer);
++	if (ret != STL_SUCCESS) {
++		T(J4FS_TRACE_ALWAYS,("%s %d: Error(offset,length,j4fs_end,nErr)=(0x%x,0x%x,0x%x,0x%x)\n",__FUNCTION__,__LINE__,offset,length,device_info.j4fs_end,ret));
++   		return J4FS_FAIL;
++	}
++#elif defined(J4FS_USE_FSR)
++	ret = FSR_STL_Read(nVol, part_id, offset/512, length/512, buffer, FSR_STL_FLAG_DEFAULT);
++	if (ret != FSR_STL_SUCCESS) {
++		T(J4FS_TRACE_ALWAYS,("%s %d: Error(offset,length,j4fs_end,nErr)=(0x%x,0x%x,0x%x,0x%x)\n",__FUNCTION__,__LINE__,offset,length,device_info.j4fs_end,ret));
++   		return J4FS_FAIL;
++	}
++// J4FS for moviNAND merged from ROSSI
++#elif defined(J4FS_USE_MOVI)
++	if (!j4fs_filp) {
++			printk(KERN_ERR "j4fs: J4FS not available\n");
++			return J4FS_FAIL;
++		}
++		j4fs_filp->f_flags |= O_NONBLOCK;
++		oldfs = get_fs(); set_fs(get_ds());
++		ret = j4fs_filp->f_op->llseek(j4fs_filp, offset, SEEK_SET);
++		ret = j4fs_filp->f_op->read(j4fs_filp, buffer, length, &j4fs_filp->f_pos);
++		set_fs(oldfs);
++		j4fs_filp->f_flags &= ~O_NONBLOCK;
++		if (ret < 0) {
++			printk(KERN_ERR "j4fs: j4fs_filp->read() failed: %d\n", ret);
++			return J4FS_FAIL;
++		}
++// J4FS for moviNAND merged from ROSSI
++#else
++'compile error'
++#endif
++
++	return J4FS_SUCCESS;
++}
++
++/*
++  * This function writes length bytes of data from a specified buffer to the destination address within the device
++  * parameters
++  *   offset  : start physical page number
++  *   length  : bytes to write
++  *   buffer  : buffer to write data
++  * return value
++  *   The return code should indicate ERROR (1) or OK(0). If the return code indicates ERROR, the dev_ptr->status field should indicate
++  *   the return error code.
++  */
++int FlashDevWrite(j4fs_device_info *dev_ptr, DWORD offset, DWORD length, BYTE *buffer)
++{
++	int ret=-1;
++#if defined(J4FS_USE_XSR) || defined(J4FS_USE_FSR)
++   	DWORD nVol=0;
++	int part_id=dev_ptr->device;
++#endif
++
++// J4FS for moviNAND merged from ROSSI
++#ifdef J4FS_USE_MOVI
++	mm_segment_t oldfs;
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++#if defined(J4FS_USE_XSR)
++	ret = STL_Write(nVol, part_id, offset/512, length/512, buffer);
++	if (ret != STL_SUCCESS) {
++		T(J4FS_TRACE_ALWAYS,("%s %d: Error(offset,length,j4fs_end,nErr)=(0x%x,0x%x,0x%x,0x%x)\n",__FUNCTION__,__LINE__,offset,length,device_info.j4fs_end,ret));
++   		return J4FS_FAIL;
++	}
++#elif defined(J4FS_USE_FSR)
++	ret = FSR_STL_Write(nVol, part_id, offset/512, length/512, buffer, FSR_STL_FLAG_DEFAULT);
++	if (ret != FSR_STL_SUCCESS) {
++		T(J4FS_TRACE_ALWAYS,("%s %d: Error(offset,length,j4fs_end,nErr)=(0x%x,0x%x,0x%x,0x%x)\n",__FUNCTION__,__LINE__,offset,length,device_info.j4fs_end,ret));
++   		return J4FS_FAIL;
++	}
++// J4FS for moviNAND merged from ROSSI
++#elif defined(J4FS_USE_MOVI)
++	if (!j4fs_filp) {
++			printk(KERN_ERR "j4fs: J4FS not available\n");
++			return J4FS_FAIL;
++	}
++	j4fs_filp->f_flags |= O_NONBLOCK;
++	oldfs = get_fs(); set_fs(get_ds());
++	ret = j4fs_filp->f_op->llseek(j4fs_filp, offset, SEEK_SET);
++	ret = j4fs_filp->f_op->write(j4fs_filp, buffer, length, &j4fs_filp->f_pos);
++	set_fs(oldfs);
++	j4fs_filp->f_flags &= ~O_NONBLOCK;
++	if (ret < 0) {
++		printk(KERN_ERR "j4fs: j4fs_filp->write() failed: %d\n", ret);
++		return J4FS_FAIL;
++	}
++// J4FS for moviNAND merged from ROSSI
++#else
++'compile error'
++#endif
++
++	return J4FS_SUCCESS;
++}
++
++/*
++  * In order to reuse the flash media, an erase command must be provided for the FSD. This command erases a single flash erase-block beginning
++  * at the address specified by the aux field in the DEVICE_INFO structure. The blocksize field of the DEVICE_INFO structure is used to force the aux ptr
++  * to a block boundary.
++  * parameters
++  *   dev_ptr->aux : start block address to be erased
++  */
++int FlashDevErase(j4fs_device_info *dev_ptr)
++{
++	// TODO
++	return J4FS_SUCCESS;
++}
++
++int FlashDevSpecial(j4fs_device_info *dev_ptr, DWORD scmd)
++{
++	switch(scmd)
++	{
++		case J4FS_INIT:
++			// Initialize the internal FSD structures to use a device
++			FlashDevMount();
++
++			break;
++
++		case J4FS_GET_INFO:
++			break;
++
++// J4FS for moviNAND merged from ROSSI
++		case J4FS_EXIT:
++			FlashDevUnmount();
++// J4FS for moviNAND merged from ROSSI
++
++		default:
++			break;
++	}
++
++	return J4FS_SUCCESS;
++}
++
++int FlashDevMount()
++{
++	DWORD media_status_table_size=1;		//  Media Status Table occupys 1 block
++
++// J4FS for moviNAND merged from ROSSI
++#ifdef J4FS_USE_MOVI
++	j4fs_filp = filp_open(J4FS_DEVNAME, O_RDWR|O_SYNC, 0);
++	if (IS_ERR(j4fs_filp)) {
++		printk("j4fs: FlashDevMount : filp_open() failed~!: %ld\n", PTR_ERR(j4fs_filp));
++		return J4FS_FAIL;
++	}
++	printk("j4fs: FlashDevMount : filp_open() OK....!\n");
++#endif
++// J4FS for moviNAND merged from ROSSI
++
++	device_info.device=J4FS_PARTITION_ID;
++	device_info.blocksize=PHYSICAL_BLOCK_SIZE;
++	device_info.pagesize=PHYSICAL_PAGE_SIZE;
++	device_info.j4fs_offset=media_status_table_size*device_info.blocksize;	 // j4fs_offset follows the Media Status Table.
++	return J4FS_SUCCESS;
++}
++
++int FlashDevUnmount()
++{
++// ROSSI Projecct(hyunkwon.kim) 2010.09.06 Add J4FS for Parameter Infomation
++#ifdef J4FS_USE_MOVI
++	filp_close(j4fs_filp, NULL);
++	printk("j4fs: FlashDevUnmount : filp_close() OK....!\n");
++#endif
++// ROSSI Projecct(hyunkwon.kim) 2010.09.06 End
++
++	return J4FS_SUCCESS;
++}
+diff --git a/drivers/samsung/param/Makefile b/drivers/samsung/param/Makefile
+new file mode 100755
+index 0000000..8a17653
+--- /dev/null
++++ b/drivers/samsung/param/Makefile
+@@ -0,0 +1,29 @@
++#
++#   Makefile for Parameter
++#
++#   Copyright(c) 2004-2006, Samsung Electronics, Co., Ltd.
++#
++
++
++MOD_NAME = param
++
++ifneq ($(KERNELRELEASE), )
++
++EXTRA_CFLAGS += -I$(PRJROOT)/modules/fsr/Inc
++
++obj-m := $(MOD_NAME).o
++
++else
++
++all:
++	@$(MAKE) -C $(KDIR) \
++		SUBDIRS=$(CURDIR) modules
++
++clean:
++	rm -f *.o *.ko *.mod.* *~ .*.cmd
++
++install:
++	@$(MAKE) --no-print-directory -C $(KDIR) \
++		SUBDIRS=$(CURDIR) modules_install
++
++endif
+diff --git a/drivers/samsung/param/param.c b/drivers/samsung/param/param.c
+new file mode 100755
+index 0000000..e070054
+--- /dev/null
++++ b/drivers/samsung/param/param.c
+@@ -0,0 +1,465 @@
++/*
++ * param.c
++ *
++ * Parameter read & save driver on param partition.
++ *
++ * COPYRIGHT(C) Samsung Electronics Co.Ltd. 2006-2010 All Right Reserved.
++ *
++ * Author: Jeonghwan Min <jeonghwan.min@samsung.com>
++ *
++ * 2008.02.26. Supprot for BML layer.
++ * 2009.12.07. Modified to support for FSR_BML
++ * 2010.04.22. Remove FSR_BML
++ *
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/errno.h>
++#include <linux/ctype.h>
++#include <linux/vmalloc.h>
++#include <linux/proc_fs.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++
++#include <linux/file.h>
++#include <mach/hardware.h>
++#include <mach/sec_param.h>
++
++#define PAGE_LEN	(4 * 1024)  /* 4KB */
++#define UNIT_LEN	(256 * 1024)  /* 256KB OneNand unit size */
++#define IMAGE_LEN	(192 * 1024)	/* 192KB, size of image area in PARAM block */
++#define PARAM_LEN	(32 * 2048)  /* 64KB */
++#define PARAM_PART_ID	0x7	// param ID is 2
++
++#define kloge(fmt, arg...)  printk(KERN_ERR "%s(%d): " fmt "\n" , __func__, __LINE__, ## arg)
++#define klogi(fmt, arg...)  printk(KERN_INFO fmt "\n" , ## arg)
++
++#define PARAM_PROCFS_DEBUG
++extern int factorytest;
++extern u32 set_default_param;
++
++#ifdef PARAM_PROCFS_DEBUG
++struct proc_dir_entry *param_dir;
++#endif
++
++/* #define PARAM_USE_INIT_BUFFER */
++
++#ifdef PARAM_USE_INIT_BUFFER
++static unsigned char *param_buf = NULL;
++static unsigned char *image_buf = NULL;
++#endif
++
++/* added by geunyoung for LFS. */
++static int load_lfs_param_value(void);
++static int save_lfs_param_value(void);
++
++static int param_check(unsigned char *addr)
++{
++	status_t 		*status;
++	status = (status_t *)addr;
++
++	if ((status->param_magic == PARAM_MAGIC) &&
++			(status->param_version == PARAM_VERSION)) {
++		klogi("Checking PARAM... OK");
++		return 0;
++	}
++
++	klogi("Checking PARAM... Invalid");
++	return -1;
++}
++
++static status_t param_status;
++
++void set_param_value(int idx, void *value)
++{
++	int i, str_i;
++
++	klogi("inside set_param_value1 idx = %d, value = %d", idx, *(int*)value);
++
++	for (i = 0; i < MAX_PARAM; i++) {
++		if (i < (MAX_PARAM - MAX_STRING_PARAM)) {
++			if(param_status.param_int_list.param_list[i].ident == idx) {
++				param_status.param_int_list.param_list[i].value = *(int *)value;
++			}
++		}
++		else {
++			str_i = (i - (MAX_PARAM - MAX_STRING_PARAM));
++			if(param_status.param_str_list[str_i].ident == idx) {
++				strlcpy(param_status.param_str_list[str_i].value,
++					(char *)value, PARAM_STRING_SIZE);
++			}
++		}
++	}
++
++	save_lfs_param_value();
++}
++EXPORT_SYMBOL(set_param_value);
++
++void get_param_value(int idx, void *value)
++{
++	int i, str_i;
++
++	for (i = 0 ; i < MAX_PARAM; i++) {
++		if (i < (MAX_PARAM - MAX_STRING_PARAM)) {
++			if(param_status.param_int_list.param_list[i].ident == idx) {
++				*(int *)value = param_status.param_int_list.param_list[i].value;
++			}
++		}
++		else {
++			str_i = (i - (MAX_PARAM - MAX_STRING_PARAM));
++			if(param_status.param_str_list[str_i].ident == idx) {
++				strlcpy((char *)value,
++					param_status.param_str_list[str_i].value, PARAM_STRING_SIZE);
++			}
++		}
++	}
++}
++EXPORT_SYMBOL(get_param_value);
++
++static void param_set_default(void)
++{
++	memset(&param_status, 0, sizeof(status_t));
++
++	param_status.param_magic = PARAM_MAGIC;
++	param_status.param_version = PARAM_VERSION;
++
++	param_status.param_int_list.param_list[0].ident = __SERIAL_SPEED;
++	param_status.param_int_list.param_list[0].value = TERMINAL_SPEED;
++	param_status.param_int_list.param_list[1].ident = __LOAD_TESTKERNEL;
++	param_status.param_int_list.param_list[1].value = LOAD_TESTKERNEL;
++	param_status.param_int_list.param_list[2].ident = __BOOT_DELAY;
++	param_status.param_int_list.param_list[2].value = BOOT_DELAY;
++	param_status.param_int_list.param_list[3].ident = __LCD_LEVEL;
++	param_status.param_int_list.param_list[3].value = LCD_LEVEL;
++	param_status.param_int_list.param_list[4].ident = __SWITCH_SEL;
++	param_status.param_int_list.param_list[4].value = SWITCH_SEL;
++	param_status.param_int_list.param_list[5].ident = __PHONE_DEBUG_ON;
++	param_status.param_int_list.param_list[5].value = PHONE_DEBUG_ON;
++	param_status.param_int_list.param_list[6].ident = __LCD_DIM_LEVEL;
++	param_status.param_int_list.param_list[6].value = LCD_DIM_LEVEL;
++	param_status.param_int_list.param_list[7].ident = __LCD_DIM_TIME;
++	param_status.param_int_list.param_list[7].value = LCD_DIM_TIME;
++	//param_status.param_int_list.param_list[8].ident = __MELODY_MODE;
++	//param_status.param_int_list.param_list[8].value = MELODY_MODE;
++	param_status.param_int_list.param_list[9].ident = __REBOOT_MODE;
++	param_status.param_int_list.param_list[9].value = REBOOT_MODE;
++	param_status.param_int_list.param_list[10].ident = __NATION_SEL;
++	param_status.param_int_list.param_list[10].value = NATION_SEL;
++	//param_status.param_int_list.param_list[11].ident = __LANGUAGE_SEL;
++	//param_status.param_int_list.param_list[11].value = LANGUAGE_SEL;
++	param_status.param_int_list.param_list[12].ident = __SET_DEFAULT_PARAM;
++	param_status.param_int_list.param_list[12].value = SET_DEFAULT_PARAM;
++	param_status.param_int_list.param_list[13].ident = __BATT_CAPACITY;
++	param_status.param_int_list.param_list[13].value = BATT_CAPACITY;
++	param_status.param_int_list.param_list[14].ident = __LOAD_KERNEL2;
++	param_status.param_int_list.param_list[14].value = LOAD_KERNEL2;
++	param_status.param_int_list.param_list[15].ident = __FLASH_LOCK_STATUS;
++	param_status.param_int_list.param_list[15].value = FLASH_LOCK_STATUS;
++	param_status.param_int_list.param_list[16].ident = __PARAM_INT_14;
++
++	param_status.param_str_list[0].ident = __VERSION;
++	strlcpy(param_status.param_str_list[0].value,
++			VERSION_LINE, PARAM_STRING_SIZE);
++	param_status.param_str_list[1].ident = __CMDLINE;
++	strlcpy(param_status.param_str_list[1].value,
++			PRODUCTION, PARAM_STRING_SIZE);
++	param_status.param_str_list[2].ident = __DELTA_LOCATION;
++	strlcpy(param_status.param_str_list[2].value,
++			"/mnt/rsv", PARAM_STRING_SIZE);
++	param_status.param_str_list[3].ident = __CMDLINE_MODE;
++	strlcpy(param_status.param_str_list[3].value,
++			CMDLINE_PROD, PARAM_STRING_SIZE);
++	param_status.param_str_list[4].ident = __PARAM_STR_4;
++}
++
++#ifdef PARAM_PROCFS_DEBUG
++static void param_show_info(void)
++{
++	signed int value = 0;
++	signed char str_val[PARAM_STRING_SIZE];
++
++	klogi("-----------------------------------------------------");
++	klogi("	Information of Parameters");
++	klogi("-----------------------------------------------------");
++	klogi("  - param_magic  : 0x%x", param_status.param_magic);
++	klogi("  - param_version  : 0x%x", param_status.param_version);
++	get_param_value(__SERIAL_SPEED, &value);
++	klogi("  - 00. SERIAL_SPEED  : %d", value);
++	get_param_value(__LOAD_TESTKERNEL, &value);
++	klogi("  - 01. LOAD_TESTKERNEL  : %d", value);
++	get_param_value(__BOOT_DELAY, &value);
++	klogi("  - 02. BOOT_DELAY  : %d", value);
++	get_param_value(__LCD_LEVEL, &value);
++	klogi("  - 03. LCD_LEVEL  : %d", value);
++	get_param_value(__SWITCH_SEL, &value);
++	klogi("  - 04. SWITCH_SEL  : %d", value);
++	get_param_value(__PHONE_DEBUG_ON, &value);
++	klogi("  - 05. PHONE_DEBUG_ON  : %d", value);
++	get_param_value(__LCD_DIM_LEVEL, &value);
++	klogi("  - 06. LCD_DIM_LEVEL  : %d", value);
++	get_param_value(__LCD_DIM_TIME, &value);
++	klogi("  - 07. LCD_DIM_TIME  : %d", value);
++	//get_param_value(__MELODY_MODE, &value);
++	//klogi("  - 08. MELODY_LEVEL  : %d", value);
++	get_param_value(__REBOOT_MODE, &value);
++	klogi("  - 09. REBOOT_MODE  : %d", value);
++	get_param_value(__NATION_SEL, &value);
++	klogi("  - 10. NATION_SEL  : %d", value);
++	//get_param_value(__LANGUAGE_SEL, &value);
++	//klogi("  - 11. LANGUAGE_SEL  : %d", value);
++	get_param_value(__SET_DEFAULT_PARAM, &value);
++	klogi("  - 12. SET_DEFAULT_PARAM  : %d", value);
++	get_param_value(__BATT_CAPACITY, &value);
++	klogi("  - 13. BATTERY_CAPACITY  : %d", value);
++	get_param_value(__LOAD_KERNEL2, &value);
++	klogi("  - 14. LOAD_KERNEL2  : %d", value);
++	get_param_value(__FLASH_LOCK_STATUS, &value);
++	klogi("  - 15. FLASH_LOCK_STATUS  : %d", value);
++	get_param_value(__PARAM_INT_14, &value);
++	klogi("  - 16. PARAM_INT_14  : %d", value);
++
++	get_param_value(__VERSION, &str_val);
++	klogi("  - 17. VERSION(STR)  : %s", str_val);
++	get_param_value(__CMDLINE, &str_val);
++	klogi("  - 18. CMDLINE(STR)  : %s", str_val);
++	get_param_value(__DELTA_LOCATION, &str_val);
++	klogi("  - 19. DELTA_LOCATION(STR)  : %s", str_val);
++	get_param_value(__CMDLINE_MODE, &str_val);
++	klogi("  - 20. CMDLINE_MODE(STR)  : %s", str_val);
++	get_param_value(__PARAM_STR_4, &str_val);
++	klogi("  - 21. PARAM_STR_4(STR)  : %s", str_val);
++	klogi("-----------------------------------------------------");
++}
++
++/* test codes for debugging */
++static int param_run_test(void)
++{
++#if 1  /* For the purpose of testing... */
++	int val=3;
++	if (!sec_set_param_value)
++		return -1;
++
++	sec_set_param_value(__SWITCH_SEL, &val);
++#endif
++	return 0;
++}
++
++static int param_lfs_run_test(void)
++{
++	return load_lfs_param_value();
++}
++
++static int param_read_proc_debug(char *page, char **start, off_t offset,
++					int count, int *eof, void *data)
++{
++	*eof = 1;
++	return sprintf(page, "0. show parameters\n\
++1. initialize parameters\n\
++2. run test function\n\
++example: echo [number] > /proc/param/debug\n");
++}
++
++static int param_write_proc_debug(struct file *file, const char *buffer,
++					unsigned long count, void *data)
++{
++	char *buf;
++
++	if (count < 1)
++		return -EINVAL;
++
++	buf = kmalloc(count, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++
++	if (copy_from_user(buf, buffer, count)) {
++		kfree(buf);
++		return -EFAULT;
++	}
++
++	switch(buf[0]) {
++		case '0':
++			param_show_info();
++			break;
++		case '1':
++			param_set_default();
++			save_lfs_param_value();
++			klogi("Parameters have been set as DEFAULT values...");
++			param_show_info();
++			break;
++		case '2':
++			param_run_test();
++			break;
++		case '3':
++			param_lfs_run_test();
++			break;
++		default:
++			kfree(buf);
++			return -EINVAL;
++	}
++
++	kfree(buf);
++	return count;
++}
++#endif  /* PARAM_PROCFS_DEBUG */
++
++static int param_init(void)
++{
++	int ret;
++
++#ifdef PARAM_USE_INIT_BUFFER
++	param_buf = kmalloc(PARAM_LEN, GFP_KERNEL);
++	if (!param_buf) {
++		kloge("Unable to alloc param_buf!");
++		return -ENOMEM;
++	}
++
++	image_buf = kmalloc(IMAGE_LEN, GFP_KERNEL);
++	if (!image_buf) {
++		kloge("Unable to alloc image_buf!");
++		kfree(param_buf);
++		return -ENOMEM;
++	}
++#endif
++
++#ifdef PARAM_PROCFS_DEBUG
++	struct proc_dir_entry *ent;
++
++	/* Creats '/proc/param' directory */
++	param_dir = proc_mkdir("param", NULL);
++	if (param_dir == NULL) {
++		kloge("Unable to create /proc/param directory\n");
++		return -ENOMEM;
++	}
++
++	/* Creats RW '/proc/param/sleep/debug' entry */
++	ent = create_proc_entry("debug", 0, param_dir);
++	if (ent == NULL) {
++		kloge("Unable to create /proc/param/debug entry");
++		ret = -ENOMEM;
++		goto fail;
++	}
++	ent->read_proc = param_read_proc_debug;
++	ent->write_proc = param_write_proc_debug;
++#endif
++
++	klogi("param_init");
++
++	if(set_default_param) {
++		param_set_default();
++		save_lfs_param_value();
++		klogi("Parameters have been set as DEFAULT values...");
++	}
++
++	ret = load_lfs_param_value();
++
++	if (ret < 0) {
++		kloge("Loading parameters failed. Parameters have been initialized as default.");
++		param_set_default();
++	}
++
++	/* set the kernel default reboot mode to FORCED_REBOOT_MODE */
++	/* param_status.param_list[9].value = FORCED_REBOOT_MODE; */
++
++	sec_set_param_value = set_param_value;
++	sec_get_param_value = get_param_value;
++
++	return 0;
++
++#ifdef PARAM_PROCFS_DEBUG
++fail:
++	remove_proc_entry("param", 0);
++
++#ifdef PARAM_USE_INIT_BUFFER
++	kfree(param_buf);
++	kfree(image_buf);
++#endif
++
++	return ret;
++#endif
++}
++
++static void param_exit(void)
++{
++	klogi("param_exit");
++
++#ifdef PARAM_USE_INIT_BUFFER
++	kfree(param_buf);
++	kfree(image_buf);
++#endif
++
++#ifdef PARAM_PROCFS_DEBUG
++	remove_proc_entry("debug", param_dir);
++	remove_proc_entry("param", 0);
++#endif
++}
++
++module_init(param_init);
++module_exit(param_exit);
++
++/* added by geunyoung for LFS. */
++#define PARAM_FILE_NAME	"/mnt/.lfs/param.blk"
++#define PARAM_RD	0
++#define PARAM_WR	1
++
++static int lfs_param_op(int dir, int flags)
++{
++	struct file *filp;
++	mm_segment_t fs;
++
++	int ret;
++
++	filp = filp_open(PARAM_FILE_NAME, flags, 0);
++
++	if (IS_ERR(filp)) {
++		pr_err("%s: filp_open failed. (%ld)\n", __FUNCTION__,
++				PTR_ERR(filp));
++
++		return -1;
++	}
++
++	fs = get_fs();
++	set_fs(get_ds());
++
++	if (dir == PARAM_RD)
++		ret = filp->f_op->read(filp, (char __user *)&param_status,
++				sizeof(param_status), &filp->f_pos);
++	else
++		ret = filp->f_op->write(filp, (char __user *)&param_status,
++				sizeof(param_status), &filp->f_pos);
++
++	set_fs(fs);
++	filp_close(filp, NULL);
++
++	return ret;
++}
++
++static int load_lfs_param_value(void)
++{
++	int ret;
++
++	ret = lfs_param_op(PARAM_RD, O_RDONLY);
++
++	if (ret == sizeof(param_status)) {
++		pr_info("%s: param.blk read successfully. (size: %d)\n", __FUNCTION__, ret);
++	}
++
++	return ret;
++}
++
++static int save_lfs_param_value(void)
++{
++	int ret;
++
++	ret = lfs_param_op(PARAM_WR, O_RDWR|O_SYNC);
++
++	if (ret == sizeof(param_status)) {
++		pr_info("%s: param.blk write successfully. (size: %d)\n", __FUNCTION__, ret);
++	}
++
++	return 0;
++}
++
++
++
+-- 
+1.8.4
+
+
