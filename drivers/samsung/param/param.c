@@ -55,6 +55,7 @@ static unsigned char *image_buf = NULL;
 static int load_lfs_param_value(void);
 static int save_lfs_param_value(void);
 
+#if 0
 static int param_check(unsigned char *addr)
 {
 	status_t 		*status;
@@ -69,6 +70,7 @@ static int param_check(unsigned char *addr)
 	klogi("Checking PARAM... Invalid");
 	return -1;
 }
+#endif
 
 static status_t param_status;
 
@@ -141,14 +143,14 @@ static void param_set_default(void)
 	param_status.param_int_list.param_list[6].value = LCD_DIM_LEVEL;
 	param_status.param_int_list.param_list[7].ident = __LCD_DIM_TIME;
 	param_status.param_int_list.param_list[7].value = LCD_DIM_TIME;
-	//param_status.param_int_list.param_list[8].ident = __MELODY_MODE;
-	//param_status.param_int_list.param_list[8].value = MELODY_MODE;
+	param_status.param_int_list.param_list[8].ident = __FORCE_PRERECOVERY;
+	param_status.param_int_list.param_list[8].value = FORCE_PRERECOVERY;
 	param_status.param_int_list.param_list[9].ident = __REBOOT_MODE;
 	param_status.param_int_list.param_list[9].value = REBOOT_MODE;
 	param_status.param_int_list.param_list[10].ident = __NATION_SEL;
 	param_status.param_int_list.param_list[10].value = NATION_SEL;
-	//param_status.param_int_list.param_list[11].ident = __LANGUAGE_SEL;
-	//param_status.param_int_list.param_list[11].value = LANGUAGE_SEL;
+	param_status.param_int_list.param_list[11].ident = __DEBUG_LEVEL;
+	param_status.param_int_list.param_list[11].value = DEBUG_LEVEL;
 	param_status.param_int_list.param_list[12].ident = __SET_DEFAULT_PARAM;
 	param_status.param_int_list.param_list[12].value = SET_DEFAULT_PARAM;
 	param_status.param_int_list.param_list[13].ident = __BATT_CAPACITY;
@@ -178,7 +180,7 @@ static void param_set_default(void)
 static void param_show_info(void)
 {
 	signed int value = 0;
-	signed char str_val[PARAM_STRING_SIZE];
+	signed char str_val[512];
 
 	klogi("-----------------------------------------------------");
 	klogi("	Information of Parameters");
@@ -201,14 +203,14 @@ static void param_show_info(void)
 	klogi("  - 06. LCD_DIM_LEVEL  : %d", value);
 	get_param_value(__LCD_DIM_TIME, &value);
 	klogi("  - 07. LCD_DIM_TIME  : %d", value);
-	//get_param_value(__MELODY_MODE, &value);
-	//klogi("  - 08. MELODY_LEVEL  : %d", value);
+	get_param_value(__FORCE_PRERECOVERY, &value);
+	klogi("  - 08. FORCE_PRERECOVERY  : %d", value);
 	get_param_value(__REBOOT_MODE, &value);
 	klogi("  - 09. REBOOT_MODE  : %d", value);
 	get_param_value(__NATION_SEL, &value);
 	klogi("  - 10. NATION_SEL  : %d", value);
-	//get_param_value(__LANGUAGE_SEL, &value);
-	//klogi("  - 11. LANGUAGE_SEL  : %d", value);
+	get_param_value(__DEBUG_LEVEL, &value);
+	klogi("  - 11. DEBUG_LEVEL  : %d", value);
 	get_param_value(__SET_DEFAULT_PARAM, &value);
 	klogi("  - 12. SET_DEFAULT_PARAM  : %d", value);
 	get_param_value(__BATT_CAPACITY, &value);
