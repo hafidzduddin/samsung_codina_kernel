@@ -13,7 +13,6 @@
 *.o
 *.o.*
 *.a
-*.s
 *.ko
 *.so
 *.so.dbg
@@ -36,7 +35,6 @@ vmlinux
 */kernel/vmlinux
 piggy.gz
 piggy.lzo
-*/myfile
 
 #
 # Top-level generic files
